@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
+from typing import Annotated
 
 import typer
 
 from cargorewind import __version__
+from cargorewind.backend import (
+    Backend,
+    DockerBackend,
+    RecordingBackend,
+    ReplayBackend,
+    ReplayError,
+)
+from cargorewind.gitops import GitError, repo_slug
+from cargorewind.patchsplit import PatchError
+from cargorewind.rewind import RewindOptions, RewindReport, rewind
+from cargorewind.runner import CommandError, SubprocessRunner
+from cargorewind.toolchain import ToolchainError
 
 app = typer.Typer(
     name="cargorewind",
@@ -43,3 +57,87 @@ def doctor() -> None:
         missing = missing or path is None
     if missing:
         raise typer.Exit(code=1)
+
+
+EXIT_NOT_VERIFIED = 2
+
+
+def _print_summary(report: RewindReport, out: Path) -> None:
+    flip = report.flip
+    assert flip is not None
+    typer.echo(f"FAIL_TO_PASS  {len(flip.fail_to_pass)}")
+    for name in flip.fail_to_pass:
+        typer.echo(f"  {name}")
+    typer.echo(f"PASS_TO_PASS  {len(flip.pass_to_pass)}")
+    if flip.regressions:
+        typer.echo(f"regressions   {len(flip.regressions)}: {', '.join(flip.regressions)}")
+    if flip.still_failing:
+        typer.echo(f"still failing {len(flip.still_failing)}: {', '.join(flip.still_failing)}")
+    verdict = "VERIFIED" if flip.verified else "NOT VERIFIED"
+    typer.echo(f"verdict       {verdict} fail-to-pass flip")
+    typer.echo(f"bundle        {out}/ (task.json, Dockerfile, test.patch, fix.patch, logs/)")
+
+
+@app.command("rewind")
+def rewind_command(
+    source: Annotated[str, typer.Argument(help="Git URL, local repository or git bundle.")],
+    fix: Annotated[str, typer.Option("--fix", help="The fix commit (full or short SHA).")],
+    base: Annotated[
+        str | None, typer.Option("--base", help="Base commit (default: first parent of fix).")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Directory for the task bundle.")] = Path(
+        "out"
+    ),
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", help="Checkout and build context (default: .cargorewind/)."),
+    ] = None,
+    image: Annotated[
+        str | None,
+        typer.Option("--image", help="Override the base image (must be digest-pinned)."),
+    ] = None,
+    record: Annotated[
+        Path | None, typer.Option("--record", help="Write a transcript of the Docker runs.")
+    ] = None,
+    replay: Annotated[
+        Path | None,
+        typer.Option("--replay", help="Replay Docker runs from a transcript (offline)."),
+    ] = None,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Seconds allowed per docker build or run.")
+    ] = 3600.0,
+) -> None:
+    """Rebuild SOURCE at the fix's base commit and verify the fail-to-pass flip."""
+    if record is not None and replay is not None:
+        raise typer.BadParameter("--record and --replay are mutually exclusive")
+    if image is not None and "@sha256:" not in image:
+        raise typer.BadParameter("--image must be pinned by digest (name@sha256:...)")
+    runner = SubprocessRunner()
+    backend: Backend
+    try:
+        if replay is not None:
+            backend = ReplayBackend(replay)
+            typer.echo(f"mode      replay of {replay} (no Docker)")
+        else:
+            backend = DockerBackend(runner, timeout=timeout)
+            if record is not None:
+                backend = RecordingBackend(backend, record)
+    except ReplayError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    options = RewindOptions(
+        source=source,
+        fix=fix,
+        out=out,
+        workdir=workdir or Path(".cargorewind") / repo_slug(source),
+        base=base,
+        image=image,
+    )
+    try:
+        report = rewind(options, runner, backend, typer.echo)
+    except (CommandError, GitError, PatchError, ReplayError, ToolchainError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _print_summary(report, out)
+    if report.flip is None or not report.flip.verified:
+        raise typer.Exit(code=EXIT_NOT_VERIFIED)

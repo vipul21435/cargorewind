@@ -76,7 +76,7 @@ class Git:
     def archive(self, rev: str, dest: Path) -> None:
         """Extract the tree of ``rev`` (no .git) into ``dest``."""
         dest.mkdir(parents=True, exist_ok=True)
-        tar_path = dest.parent / f".{dest.name}.tar"
+        tar_path = (dest.parent / f".{dest.name}.tar").resolve()
         checked(self._run("archive", "--format=tar", f"--output={tar_path}", rev))
         try:
             with tarfile.open(tar_path) as tar:
@@ -90,7 +90,7 @@ class Git:
         checked(self._run("clean", "-fdxq"))
 
     def apply(self, patch: Path) -> None:
-        result = self._run("apply", "--whitespace=nowarn", str(patch))
+        result = self._run("apply", "--whitespace=nowarn", str(patch.resolve()))
         if not result.ok:
             raise GitError(f"patch does not apply: {patch.name}\n{result.stderr.strip()}")
 

@@ -7,6 +7,8 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-added-large-files
+        # The demo git bundle (full strsim-rs history up to the fix) is about 650 KB.
+        args: ["--maxkb=1024"]
   - repo: local
     hooks:
       - id: ruff-check

@@ -159,6 +159,8 @@ def test_replay_rejects_bad_transcripts(tmp_path: Path) -> None:
     bad.write_text(json.dumps({"schema": 99}))
     with pytest.raises(ReplayError, match="schema"):
         ReplayBackend(bad)
+    with pytest.raises(ReplayError, match="cannot read"):
+        ReplayBackend(tmp_path / "missing.json")
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"schema": 1, "build": None, "runs": {}}))
     with pytest.raises(ReplayError, match="no recorded build"):

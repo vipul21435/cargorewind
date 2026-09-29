@@ -178,7 +178,10 @@ class ReplayBackend:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise ReplayError(f"{path}: cannot read transcript: {exc}") from exc
         if data.get("schema") != TRANSCRIPT_SCHEMA:
             raise ReplayError(f"{path}: unsupported transcript schema {data.get('schema')!r}")
         self.data: dict[str, Any] = data

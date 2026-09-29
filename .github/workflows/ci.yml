@@ -43,7 +43,9 @@ jobs:
           enable-cache: true
       - name: Install
         run: make install
-      - name: Build image and run the CLI in it
-        run: make docker-demo IMAGE=cargorewind:ci
-      - name: Demo
+      - name: Offline demo (replayed Docker runs)
         run: make demo
+      - name: Build the CLI image and run the demo in it
+        run: make docker-demo IMAGE=cargorewind:ci
+      - name: Live end-to-end rewind through Docker (rust:1.39.0-slim)
+        run: make e2e
