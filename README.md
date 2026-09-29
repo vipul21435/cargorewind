@@ -464,9 +464,10 @@ lock      16 pin(s) in 4 round(s); every crates.io package is bounded
 wrote     out/lock-demo/ (lock.json, Cargo.lock)
 ```
 
-Only the pins are needed: 32 entries were late after `cargo generate-lockfile`, but
-older `rustix` and `tempfile` versions drop most of them (the newest `windows-sys`
-family) from the graph. Without the bound the environment does not build. The same
+Sixteen pins cover 32 late entries: once `home`, `rustix` and `tempfile` are back at
+2023 versions, cargo drops the `windows-sys` 0.59 and 0.61 families, `getrandom` and
+`r-efi` from the graph, leaving only the `windows-sys` 0.48 family that which-rs asks
+for itself (41 entries become 27). Without the bound the environment does not build. The same
 toolchain image, with a plain `cargo generate-lockfile` and `cargo build`
 (`docker run --rm cargorewind/toolchain-stage:887233ab831d sh -c '...'`), locks
 `home 0.5.12` and stops:
@@ -630,7 +631,7 @@ flowchart LR
 | Offline split of the demo fix, fresh work directory | 0.44 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
 | Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs) | 2 passed, 12.2 s with a warm Docker cache | `time make e2e` |
-| Live e2e on GitHub Actions (amd64: pull, build, three runs) | 23 s step time | CI run [36631820323](https://github.com/vipul21435/cargorewind/actions/runs/36631820323), step "Live end-to-end rewind" |
+| Live e2e on GitHub Actions (amd64: both e2e tests, image pulls, pin loop, vendored build, six runs) | 42 s step time | CI run [36646246333](https://github.com/vipul21435/cargorewind/actions/runs/36646246333), step "Live end-to-end runs through Docker" |
 | Offline demo, fresh work directory | 0.60 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
 | Offline toolchain inference of the demo fix, fresh work directory | 0.22 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
 | Offline replay of the which-rs pin loop, fresh work directory | 0.28 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
@@ -690,9 +691,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 - **Bound by publish time, not by resolution order.** The cutoff is the fix commit's
   committer time, and an entry is late when its crates.io `pubtime` is at or after
   it. Only the late entries that no other late entry depends on are pinned in a
-  round, because pinning a dependent first changes what its dependencies may be (an
-  older `rustix` stops pulling the newest `windows-sys` family, so those entries leave
-  the graph instead of needing pins). cargo itself does the rewriting with
+  round, because pinning a dependent first changes what its dependencies may be (in
+  the which-rs demo, older `home`, `rustix` and `tempfile` stop pulling the newer
+  `windows-sys` families, so those entries leave the graph instead of needing pins). cargo itself does the rewriting with
   `cargo update --precise`, so the lockfile stays in the format and resolution cargo
   would write, and a pin cargo refuses is recorded and retried with the next older
   version.
