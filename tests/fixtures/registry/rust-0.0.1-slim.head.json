@@ -1,0 +1,9 @@
+{
+  "note": "HEAD https://registry-1.docker.io/v2/library/rust/manifests/0.0.1-slim, recorded 2026-09-30: an unknown tag",
+  "status": 404,
+  "headers": {
+    "content-type": "application/json",
+    "content-length": "104",
+    "docker-distribution-api-version": "registry/2.0"
+  }
+}

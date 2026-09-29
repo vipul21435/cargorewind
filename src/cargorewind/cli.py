@@ -18,6 +18,7 @@ from cargorewind.backend import (
 )
 from cargorewind.gitops import GitError, open_checkout, repo_slug
 from cargorewind.patchsplit import PatchError
+from cargorewind.registry import make_resolver
 from cargorewind.rewind import RewindOptions, RewindReport, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
 from cargorewind.splitreport import resolve_commits, split_commit
@@ -61,6 +62,18 @@ def doctor() -> None:
 
 
 EXIT_NOT_VERIFIED = 2
+
+REGISTRY_OPTION = typer.Option(
+    "--registry/--offline",
+    help=(
+        "Look up rust:<version>-slim digests in the Docker Hub registry (cached), with the "
+        "offline table as fallback. Default: offline table only."
+    ),
+)
+CACHE_DIR_OPTION = typer.Option(
+    "--cache-dir",
+    help="Registry digest cache directory (default: $CARGOREWIND_CACHE_DIR or ~/.cache).",
+)
 
 
 def _print_summary(report: RewindReport, out: Path) -> None:
@@ -139,6 +152,8 @@ def rewind_command(
     timeout: Annotated[
         float, typer.Option("--timeout", help="Seconds allowed per docker build or run.")
     ] = 3600.0,
+    registry: Annotated[bool, REGISTRY_OPTION] = False,
+    cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
 ) -> None:
     """Rebuild SOURCE at the fix's base commit and verify the fail-to-pass flip."""
     if record is not None and replay is not None:
@@ -165,6 +180,7 @@ def rewind_command(
         workdir=workdir or Path(".cargorewind") / repo_slug(source),
         base=base,
         image=image,
+        resolver=make_resolver(registry, cache_dir),
     )
     try:
         report = rewind(options, runner, backend, typer.echo)

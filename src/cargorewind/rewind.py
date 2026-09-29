@@ -15,9 +15,10 @@ from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
 from cargorewind.gitops import Git, GitTree, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.patchsplit import SplitResult
+from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
 from cargorewind.splitreport import require, resolve_commits, split_commit, touched
-from cargorewind.toolchain import Toolchain, base_image, resolve_toolchain
+from cargorewind.toolchain import Toolchain, resolve_toolchain
 
 TASK_SCHEMA = 1
 STAGES = ("base", "before", "after")
@@ -33,6 +34,7 @@ class RewindOptions:
     workdir: Path
     base: str | None = None
     image: str | None = None
+    resolver: ImageResolver | None = None  # default: the offline digest table
 
 
 @dataclass
@@ -49,7 +51,7 @@ class RewindReport:
     fix: str
     commit_date: str
     toolchain: Toolchain
-    image: str
+    image: ImageChoice
     image_id: str
     has_lockfile: bool
     split: SplitResult
@@ -67,7 +69,8 @@ class RewindReport:
             "fix_commit": self.fix,
             "commit_date": self.commit_date,
             "toolchain": self.toolchain.as_dict(),
-            "image": self.image,
+            "image": self.image.reference,
+            "image_source": {"source": self.image.source, "reason": self.image.reason},
             "lockfile": "committed" if self.has_lockfile else "generated",
             "test_command": " ".join(TEST_COMMAND),
             "split": {
@@ -165,7 +168,11 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     require(checks)
 
     toolchain = resolve_toolchain(GitTree(git, base), commit_time)
-    image = options.image or base_image(toolchain.image_version)
+    if options.image is not None:
+        choice = ImageChoice(options.image, "override", "--image")
+    else:
+        choice = (options.resolver or ImageResolver()).resolve(toolchain.image_version)
+    image = choice.reference
     has_lockfile = git.show_file(base, "Cargo.lock") is not None
     log(f"toolchain {toolchain.version}: {toolchain.reason}")
     log(f"image     {image}")
@@ -195,7 +202,7 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         fix,
         commit_time.isoformat(),
         toolchain,
-        image,
+        choice,
         built.image_id,
         has_lockfile,
         split,

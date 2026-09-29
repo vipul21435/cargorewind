@@ -8,9 +8,12 @@ import pytest
 
 from cargorewind.backend import BuildResult, Overlay, ReplayBackend, RunResult
 from cargorewind.gitops import GitError
+from cargorewind.registry import HttpResponse, ImageResolver, RegistryClient
 from cargorewind.rewind import RewindOptions, rewind
 from cargorewind.runner import SubprocessRunner
+from cargorewind.toolchain import IMAGE_DIGESTS
 from tests.conftest import GitRepo
+from tests.test_registry import FakeHttp
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEMO = REPO_ROOT / "examples" / "strsim"
@@ -93,6 +96,8 @@ def test_rewind_synthetic_crate_end_to_end(
     assert task["toolchain"]["version"] == "1.70.0"
     assert task["toolchain"]["source"] == "rust-toolchain"
     assert task["lockfile"] == "committed"
+    assert task["image"] == f"rust:1.70.0-slim@{IMAGE_DIGESTS['1.70.0']}"
+    assert task["image_source"] == {"source": "offline-table", "reason": "offline digest table"}
     assert task["split"]["shared_files"] == ["src/lib.rs"]
     hunk = task["split"]["cfg_test_hunks"][0]
     assert (hunk["test_lines"], hunk["fix_lines"]) == (5, 2)
@@ -122,6 +127,45 @@ def test_rewind_synthetic_crate_end_to_end(
     assert backend.overlays["after"].files["src/lib.rs"].decode() == FIXED
     assert any(line.startswith("toolchain 1.70.0") for line in lines)
     assert not any("first parent" in line for line in lines)
+
+
+PASSING = {
+    "base": (0, "test tests::zero ... ok\n"),
+    "before": (101, "test tests::zero ... ok\ntest tests::two ... FAILED\n"),
+    "after": (0, "test tests::zero ... ok\ntest tests::two ... ok\n"),
+}
+
+
+def test_rewind_image_from_the_registry_or_an_override(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    _, fix = _crate(repo, lockfile=True)
+    digest = "sha256:" + "d" * 64
+    head = HttpResponse(
+        200,
+        {
+            "docker-content-digest": digest,
+            "content-type": "application/vnd.oci.image.index.v1+json",
+        },
+    )
+    http = FakeHttp({("HEAD", "v2/library/rust/manifests/1.70.0-slim"): head})
+    resolver = ImageResolver(registry=RegistryClient(http, auth=None))
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", resolver=resolver)
+    backend = ScriptedBackend(PASSING)
+    rewind(options, SubprocessRunner(), backend, lambda _: None)
+    task = json.loads((out / "task.json").read_text())
+    assert task["image"] == f"rust:1.70.0-slim@{digest}"
+    assert task["image_source"]["source"] == "registry"
+    assert task["image_source"]["reason"].endswith("differs from the offline table")
+    assert f"FROM rust:1.70.0-slim@{digest}" in backend.dockerfile
+
+    pinned = "rust:1.70.0-slim@sha256:" + "e" * 64
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", image=pinned)
+    rewind(options, SubprocessRunner(), ScriptedBackend(PASSING), lambda _: None)
+    task = json.loads((out / "task.json").read_text())
+    assert (task["image"], task["image_source"]["source"]) == (pinned, "override")
 
 
 def test_rewind_detects_patches_that_do_not_reproduce_the_fix(

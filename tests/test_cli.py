@@ -108,3 +108,27 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     assert result.exit_code == 2
     assert "regressions   1: a" in result.stdout
     assert "NOT VERIFIED" in result.stdout
+
+
+def test_rewind_registry_options_reach_the_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[bool, Path | None]] = []
+    real = cli.make_resolver
+
+    def spy(registry: bool, cache_dir: Path | None = None) -> object:
+        seen.append((registry, cache_dir))
+        return real(False)
+
+    monkeypatch.setattr(cli, "make_resolver", spy)
+    args = _demo_args(
+        tmp_path,
+        "--replay",
+        str(DEMO / "transcript.json"),
+        "--registry",
+        "--cache-dir",
+        str(tmp_path / "cache"),
+    )
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert seen == [(True, tmp_path / "cache")]

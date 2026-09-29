@@ -1,0 +1,11 @@
+{
+  "note": "HEAD https://registry-1.docker.io/v2/library/rust/manifests/1.39.0-slim, recorded 2026-09-30 (rate-limit and source headers dropped)",
+  "status": 200,
+  "headers": {
+    "content-type": "application/vnd.docker.distribution.manifest.list.v2+json",
+    "content-length": "984",
+    "docker-content-digest": "sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652",
+    "docker-distribution-api-version": "registry/2.0",
+    "etag": "\"sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652\""
+  }
+}
