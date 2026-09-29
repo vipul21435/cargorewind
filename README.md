@@ -10,7 +10,9 @@ so the host needs git and Docker but no Rust toolchain.
 Give it a repository and a fix commit. It exports a benchmark-style task bundle:
 `task.json` with FAIL_TO_PASS and PASS_TO_PASS lists, the environment `Dockerfile`, a
 `test.patch`, a `fix.patch`, a `split.json` report of how the diff was divided, a
-`toolchain.json` report of how the toolchain was chosen, and the logs of every run.
+`toolchain.json` report of how the toolchain was chosen, a `lock.json` report of how
+the dependencies were fixed (plus the `Cargo.lock` it wrote when the commit had none),
+and the logs of every run.
 
 ## What works today
 
@@ -27,17 +29,26 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
   `autotests = false` and the other auto flags). A module-tree walk from each target
   root follows `mod name;` the way rustc resolves it (`name.rs`, `name/mod.rs`,
   `#[path]`, declarations nested in inline modules), so a module file reached only
-  through `#[cfg(test)] mod tests;` goes to `test.patch` whole. Files the walk cannot
-  reach fall back to path conventions. The walk only descends toward changed files.
+  through `#[cfg(test)] mod tests;` goes to `test.patch` whole. A plain `mod tests;`
+  whose file starts with `#![cfg(test)]` goes to `test.patch` together with that file.
+  A crate under a `tests/` directory that no workspace lists (for example
+  `tests/fixtures/<name>/Cargo.toml`) is test data of the enclosing package, not a
+  package. Files the walk cannot reach fall back to path conventions, where any
+  `tests/` directory (also below `src/`) means test data. The walk only descends
+  toward changed files.
 - **A small Rust lexer instead of a brace scan.** It skips line, doc and nested block
   comments and knows strings, raw strings (`r#"..."#`), byte and C strings, char and
   byte literals, lifetimes, labels and raw identifiers. On top of it, the scanner finds
   test-only code: inline `#[cfg(test)]` modules, out-of-line `#[cfg(test)] mod name;`
   declarations, single items, fields and statements, inner `#![cfg(test)]`, and
   compound predicates. `cfg(all(test, ...))` and `cfg(any(test, doctest))` count;
-  `cfg(not(test))` and `cfg(any(test, feature = "x"))` do not. Changed lines inside
-  those regions go to `test.patch`, the rest to `fix.patch`, and hunk ranges are
-  recomputed for the intermediate tree.
+  `cfg(not(test))` and `cfg(any(test, feature = "x"))` do not. An attributed `if`,
+  `for`, `match` or loop statement ends at its closing brace, `let`, `static` and
+  `const` end at their semicolon, and braces inside generics (`impl Foo<{ N }>`) are
+  not an item's body. Changed lines inside those regions go to `test.patch`, the rest
+  to `fix.patch`. Hunk ranges and "No newline at end of file" markers are recomputed
+  for the intermediate tree, and diffs are split on `\n` only, so CRLF files and form
+  feeds survive.
 - **`cargorewind split` and `split.json`, no Docker needed.** The command prints each
   file's role and patch, the test-only regions and the hunks of files shared by both
   patches. It writes `test.patch`, `fix.patch` and `split.json`, which lists packages
@@ -46,7 +57,9 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
 - **Split proof.** `git apply --check` must accept `test.patch` on a clean checkout of
   base and `fix.patch` on top of it. Then both are applied, and the result has to match
   the fix commit's blob ids for every touched path. `rewind` runs the same checks and
-  stops before Docker if one fails.
+  stops before Docker if one fails. Runs that share a work checkout take turns through
+  an `flock` on it, so parallel `split` or `rewind` runs of one repository do not break
+  each other.
 - **Toolchain inference with a reason for every step.** Toolchain files are read with
   rustup's rules. `rust-toolchain.toml` gives `channel`, `components`, `targets` and
   `profile`. The legacy `rust-toolchain` file can be a bare channel line or the same
@@ -65,7 +78,9 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
     from `[workspace.package]`;
   - the edition minimum (2018 -> 1.31, 2021 -> 1.56, 2024 -> 1.85), including
     per-target `edition` keys;
-  - 1.64 when a manifest inherits from the workspace.
+  - 1.64 when a manifest inherits from the workspace;
+  - the oldest cargo that reads the committed `Cargo.lock` (format v2 -> 1.41,
+    v3 -> 1.53, v4 -> 1.78).
 
   Dated channels are installed with rustup on the pinned `rust:1.98.1-slim` image.
   They are never raised; a warning is recorded when one looks older than a floor.
@@ -77,16 +92,43 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
   follows its predecessor and comes before the next minor.
 - **Digest-pinned images, offline or from the registry.** By default the base image
   comes from an offline table of multi-arch `rust:<version>-slim` index digests
-  (8 versions). `--registry` looks the tag up in the Docker Hub registry HTTP API:
+  (9 versions). `--registry` looks the tag up in the Docker Hub registry HTTP API:
   an anonymous pull token, then a HEAD request whose `Docker-Content-Digest` is the
   index digest (HEAD does not count as a pull). Answers are cached in a JSON file
   (`--cache-dir`, default `~/.cache/cargorewind`), and the offline table is the
   fallback when the registry cannot answer. `task.json` records where the digest
   came from. `--image name@sha256:...` overrides both.
+- **Dependencies fixed three ways.** A committed `Cargo.lock` has its format version
+  detected (v1 to v4, including the pre-1.22 `[root]` table) and is fetched with
+  `cargo fetch --locked`. Without one, a crate with no crates.io dependencies lets
+  cargo write the lockfile in the image. Otherwise the lockfile is **bounded by the
+  commit date**: cargo generates one in a container of the chosen toolchain, and a pin
+  loop moves every crates.io entry published at or after the fix commit's committer
+  time to the newest non-yanked version published before it that satisfies every
+  requirement on it (from the workspace manifests, or from the index entry of each
+  dependent's locked version). It runs `cargo update -p name:version --precise`,
+  reads the lockfile again and repeats from the top of the dependency graph down,
+  because older versions bring older transitive dependencies. If cargo refuses a pin,
+  the next older version is tried. Entries that cannot be bounded are reported, and
+  `cargorewind lock` exits 2.
+- **crates.io metadata from the sparse index.** One request per crate to
+  `https://index.crates.io` gives every version's publish time (`pubtime`), yanked
+  flag, `rust_version` and dependencies. Answers are cached as JSON (`--cache-dir`)
+  and refetched only when they are older than the commit. `--index-dir` reads
+  recorded files in the same layout instead, which the tests and the offline demo use.
+  Requirements follow cargo's semver rules: caret, tilde, wildcards, `=`, `>`, `>=`,
+  `<`, `<=`, comma-separated bounds and the pre-release rule.
+- **Vendoring for offline builds.** `--vendor` runs `cargo vendor --locked` in the
+  image, writes the source replacement to `~/.cargo/config.toml` (`config` before cargo
+  1.39), and builds and runs every stage with `--offline` under
+  `docker run --network none`. It is refused below cargo 1.37, which has no
+  `cargo vendor`.
 - **Deterministic environment Dockerfile.** Pinned base, non-root user,
-  `LABEL project=cargorewind`, `CARGO_BUILD_JOBS=2`, `cargo fetch --locked` when a
-  `Cargo.lock` is committed (otherwise `cargo generate-lockfile`), and a warm
-  `cargo test --no-run`. As root, before the user switch, it runs
+  `LABEL project=cargorewind`, `CARGO_BUILD_JOBS=2`, one of the three dependency
+  strategies above, and a warm `cargo test --no-run`. A date-bounded lockfile adds a
+  `toolchain` stage: the pin loop runs in a container of that stage, and the final
+  stage copies the lockfile in. Images are tagged with the base commit and a digest of
+  the Dockerfile and lockfile. As root, before the user switch, it runs
   `rustup toolchain install` for a dated channel and `rustup component add` or
   `target add` for what the toolchain file lists. It sets `RUSTUP_TOOLCHAIN` whenever
   the checkout has a toolchain file, so rustup cannot switch to the file's channel
@@ -100,9 +142,10 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
   line number, so they stay stable when a patch shifts lines. When the before run fails
   to compile, the base run decides whether an existing test counts as PASS_TO_PASS
   instead of inflating FAIL_TO_PASS. Regressions block verification.
-- **Record and replay.** `--record` writes a transcript of the Docker runs.
-  `--replay` answers from that transcript offline, but only when the Dockerfile and
-  every file overlay are byte-identical to the recorded ones, checked by sha256.
+- **Record and replay.** `--record` writes a transcript of the Docker builds, test runs
+  and pin-loop session steps. `--replay` answers from that transcript offline, but only
+  when the Dockerfile, every file overlay and every session script are byte-identical
+  to the recorded ones, checked by sha256.
 
 ## Quickstart
 
@@ -112,8 +155,10 @@ make install     # uv sync --frozen
 make demo        # offline: replays the recorded Docker runs of a real strsim-rs fix
 make split-demo  # offline: only the patch split of the same fix, with split.json
 make toolchain-demo  # offline: every toolchain decision for the same fix, toolchain.json
+make lock-demo   # offline: replays the pin loop that bounds which-rs's lockfile by date
 make check       # ruff, mypy --strict, pytest with the 90% coverage gate
 make demo-live   # needs Docker: builds rust:1.39.0-slim and runs all three stages
+make lock-demo-live  # needs Docker: the same pin loop with real cargo in rust:1.73.0-slim
 ```
 
 ## Usage
@@ -124,9 +169,13 @@ cargorewind split <git-url | path | bundle> --fix <sha> [--base <sha>] [--out ou
 cargorewind toolchain <git-url | path | bundle> <fix-sha> [--base <sha>]
     [--json toolchain.json] [--workdir .cargorewind/<name>]
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
+cargorewind lock <git-url | path | bundle> <fix-sha> [--base <sha>] [--out out/lock]
+    [--workdir .cargorewind/<name>] [--registry | --offline] [--cache-dir <dir>]
+    [--index-dir <recorded index>] [--record t.json | --replay t.json] [--timeout 3600]
 cargorewind rewind <git-url | path | bundle> --fix <sha> [--base <sha>] [--out out]
     [--workdir .cargorewind/<name>] [--image rust:X-slim@sha256:...]
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
+    [--vendor] [--index-dir <recorded index>]
     [--record transcript.json | --replay transcript.json] [--timeout 3600]
 ```
 
@@ -134,7 +183,9 @@ cargorewind rewind <git-url | path | bundle> --fix <sha> [--base <sha>] [--out o
 release rule by the fix's committer date, exactly as `rewind` does.
 
 Exit codes: `split` returns 0 when every check passes and 1 otherwise. `toolchain`
-returns 0 when it resolves a toolchain and a pinned image and 1 otherwise. `rewind` returns
+returns 0 when it resolves a toolchain and a pinned image and 1 otherwise. `lock`
+returns 0 when the lockfile is committed or every crates.io entry is bounded, 2 when
+some entry cannot be bounded, and 1 on errors. `rewind` returns
 0 when the flip is verified, 2 when the runs complete but the flip is not verified, and
 1 on errors (unknown commit, patch that does not apply, unpinned toolchain, transcript
 mismatch).
@@ -160,8 +211,8 @@ check     fix.patch applies on top (git apply --check): ok
 check     both patches reproduce the fix (2 paths): ok
 toolchain 1.39.0: newest stable before 2019-12-13 (1.39.0 released 2019-11-07)
 image     rust:1.39.0-slim@sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652
-lockfile  none: generated
-build     cargorewind/strsim-rs:c4cdd9c35dfa
+lockfile  none, and no crates.io dependencies: cargo generates it in the image
+build     cargorewind/strsim-rs:c4cdd9c35dfa-fa8bab55b1d0
 run       base   exit   0  102 passed, 0 failed, 0 ignored
 run       before exit 101  102 passed, 2 failed, 0 ignored
 run       after  exit   0  104 passed, 0 failed, 0 ignored
@@ -170,7 +221,7 @@ FAIL_TO_PASS  2
   tests::jaro_winkler_same_one_character
 PASS_TO_PASS  102
 verdict       VERIFIED fail-to-pass flip
-bundle        out/demo/ (task.json, split.json, Dockerfile, test.patch, fix.patch, logs/)
+bundle        out/demo/ (task.json, split.json, toolchain.json, lock.json, Dockerfile, patches, logs/)
 ```
 
 The live run (`make demo-live`) prints the same lines without the `mode` line. An
@@ -192,6 +243,8 @@ excerpt of the exported `out/demo/task.json`:
   "image_source": {"source": "offline-table", "reason": "offline digest table"},
   "toolchain_report": "toolchain.json",
   "lockfile": "generated",
+  "lock_report": "lock.json",
+  "vendored": false,
   "test_command": "cargo test --no-fail-fast",
   "split": {"test_files": ["src/lib.rs"], "fix_files": ["CHANGELOG.md", "src/lib.rs"],
             "shared_files": ["src/lib.rs"], "report": "split.json", "...": "..."},
@@ -221,8 +274,8 @@ RUN useradd --create-home --uid 10001 rewind
 USER rewind
 WORKDIR /home/rewind/repo
 COPY --chown=rewind:rewind repo/ ./
-# No Cargo.lock at the base commit: resolve one now. The resolution is not
-# yet bounded by the commit date (see PLAN.md, slice 3).
+# No Cargo.lock at the base commit and no crates.io dependencies, so there is
+# nothing to bound by the commit date: cargo writes the lockfile here.
 RUN cargo generate-lockfile
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run
@@ -367,6 +420,157 @@ USER rewind
 `1.42.0-nightly`. It also found rustfmt `1.4.11-nightly` and reported
 `test tests::adds ... ok`.
 
+### Dependencies bounded by the commit date
+
+[harryfei/which-rs](https://github.com/harryfei/which-rs) (MIT) at
+[`e776ff0`](https://github.com/harryfei/which-rs/commit/e776ff05bc7c36b5393441a73f104145602dff85)
+("Return appropriate error if path list defined and empty", committed 2023-10-17) has no
+`Cargo.lock`. Its manifest asks for `either`, `rustix`, `home`, an optional `regex`,
+`windows-sys` and `once_cell` on Windows, and `tempfile` for tests. The history up to
+that commit is bundled in `examples/which-rs/` with its license. Real output of
+`make lock-demo`, which replays a live run recorded with `make record-lock-demo`
+(offline, 0.28 s wall):
+
+```text
+mode      replay of examples/which-rs/lock-transcript.json (no Docker)
+base      70d2d1c97048 (first parent of fix)
+fix       e776ff05bc7c  committed 2023-10-17T22:45:33+00:00
+toolchain 1.73.0 (release-date): newest stable before 2023-10-17 (1.73.0 released 2023-10-05)
+lockfile  none: 7 crates.io requirement(s); bounding every package to before 2023-10-17T22:45:33+00:00
+image     rust:1.73.0-slim@sha256:666012b6779ebb6be2acb771b8627716662cf699502e734652c4799ae4199691
+build     cargorewind/toolchain-stage:a08cf0a86265 (toolchain stage for the pin loop)
+lock      generated: 41 crates.io package(s), 32 published at or after 2023-10-17T22:45:33+00:00
+pin       round 1: 5 package(s)
+          either 1.18.0 -> 1.9.0 (ok)
+          home 0.5.12 -> 0.5.5 (ok)
+          regex 1.13.1 -> 1.10.2 (ok)
+          rustix 0.38.44 -> 0.38.19 (ok)
+          tempfile 3.27.0 -> 3.8.0 (ok)
+pin       round 2: 7 package(s)
+          bitflags 2.13.2 -> 2.4.1 (ok)
+          cfg-if 1.0.5 -> 1.0.0 (ok)
+          errno 0.3.14 -> 0.3.5 (ok)
+          fastrand 2.5.0 -> 2.0.1 (ok)
+          linux-raw-sys 0.4.15 -> 0.4.10 (ok)
+          once_cell 1.21.4 -> 1.18.0 (ok)
+          regex-automata 0.4.18 -> 0.4.3 (ok)
+pin       round 3: 3 package(s)
+          aho-corasick 1.1.5 -> 1.1.2 (ok)
+          libc 0.2.189 -> 0.2.149 (ok)
+          regex-syntax 0.8.11 -> 0.8.2 (ok)
+pin       round 4: 1 package(s)
+          memchr 2.8.3 -> 2.6.4 (ok)
+lock      16 pin(s) in 4 round(s); every crates.io package is bounded
+wrote     out/lock-demo/ (lock.json, Cargo.lock)
+```
+
+Only the pins are needed: 32 entries were late after `cargo generate-lockfile`, but
+older `rustix` and `tempfile` versions drop most of them (the newest `windows-sys`
+family) from the graph. Without the bound the environment does not build. The same
+toolchain image, with a plain `cargo generate-lockfile` and `cargo build`
+(`docker run --rm cargorewind/toolchain-stage:887233ab831d sh -c '...'`), locks
+`home 0.5.12` and stops:
+
+```text
+  Downloaded home v0.5.12
+error: failed to download replaced source registry `crates-io`
+
+Caused by:
+  failed to parse manifest at `/usr/local/cargo/registry/src/index.crates.io-6f17d22bba15001f/home-0.5.12/Cargo.toml`
+...
+  this version of Cargo is older than the `2024` edition, and only supports `2015`, `2018`, and `2021` editions.
+cargo build exit: 101
+```
+
+An excerpt of `out/lock-demo/lock.json`:
+
+```json
+{
+  "strategy": "date-bounded",
+  "toolchain": "1.73.0",
+  "cutoff": "2023-10-17T22:45:33+00:00",
+  "requirements": [
+    {"member": "which", "name": "either", "req": "1.6.1", "kind": "normal", "target": null,
+     "optional": false},
+    "...",
+    {"member": "which", "name": "home", "req": "0.5.5", "kind": "normal",
+     "target": "cfg(any(windows, unix, target_os = \"redox\"))", "optional": false},
+    "..."
+  ],
+  "registry_packages": 41,
+  "late_at_start": 32,
+  "rounds": [
+    {"round": 1, "pins": [
+      {"name": "home", "from": "0.5.12", "to": "0.5.5",
+       "reason": "0.5.12 published 2025-10-23; 0.5.5 (2023-04-25) matches 0.5.5 (which)",
+       "error": null}, "..."]},
+    "..."
+  ],
+  "unbounded": [],
+  "bounded": true
+}
+```
+
+The full live rewind of the same commit with `--vendor` builds the two-stage
+environment, vendors the 27 locked crates and runs every stage offline. Command:
+`uv run cargorewind rewind examples/which-rs/which-rs.bundle --fix e776ff0 --vendor
+--index-dir examples/which-rs/index --out out/which-vendored`. Its last lines (the pin
+lines are the same as above):
+
+```text
+lock      16 pin(s) in 4 round(s); every crates.io package is bounded
+build     cargorewind/which-rs:70d2d1c97048-a1cac10abe6c
+run       base   exit   0  19 passed, 0 failed, 0 ignored
+run       before exit   0  19 passed, 0 failed, 0 ignored
+run       after  exit   0  19 passed, 0 failed, 0 ignored
+FAIL_TO_PASS  0
+PASS_TO_PASS  19
+verdict       NOT VERIFIED fail-to-pass flip
+bundle        out/which-vendored/ (task.json, split.json, toolchain.json, lock.json, Cargo.lock, Dockerfile, patches, logs/)
+```
+
+This fix commit changes no test, so there is no flip to verify (exit 2); the run shows
+that the bounded environment builds and its 19 tests (16 in `tests/basic.rs`, 3
+doctests) pass with `--offline` under `--network none`. The dependency part of its
+`Dockerfile`:
+
+```dockerfile
+FROM rust:1.73.0-slim@sha256:666012b6779ebb6be2acb771b8627716662cf699502e734652c4799ae4199691 AS toolchain
+...
+COPY --chown=rewind:rewind repo/ ./
+
+FROM toolchain
+# Cargo.lock written by cargorewind: every crates.io package was published
+# before 2023-10-17T22:45:33+00:00 (see lock.json).
+COPY --chown=rewind:rewind Cargo.lock ./
+RUN cargo fetch --locked
+# Vendor every dependency and point cargo at the copies; tests run --offline.
+RUN mkdir -p /home/rewind/.cargo \
+    && cargo vendor --locked /home/rewind/vendor > /home/rewind/.cargo/config.toml
+ENV CARGO_NET_OFFLINE=true
+# Warm build: compile dependencies and every test target once at base.
+RUN cargo test --no-run --offline
+```
+
+A commit with a committed lockfile needs no Docker for this step. which-rs `17fde4a`
+(2026-08-26), cloned from GitHub (`uv run cargorewind lock
+https://github.com/harryfei/which-rs 17fde4a`, 1.85 s wall):
+
+```text
+base      48e49d554b7a (first parent of fix)
+fix       17fde4abb85f  committed 2026-08-26T16:25:50+00:00
+toolchain 1.98.0 (release-date): newest stable before 2026-08-26 (1.98.0 released 2026-08-20)
+lockfile  committed Cargo.lock, format v3 (cargo 1.53.0+ reads it); cargo fetch --locked
+wrote     out/lock/ (lock.json)
+```
+
+The pin loop itself is unit-tested against a small model of cargo's resolver over
+recorded index files (`tests/fixtures/crates-index/`). There, `home = "0.5.4"` bounded
+to 2024-03-01 moves `home` from 0.5.12 to 0.5.9, then `windows-targets` from 0.52.6 to
+0.52.4 (skipping the yanked 0.52.1 and 0.52.2), then the seven `windows_*` crates, in
+three rounds. Other tests cover a refused pin (the next older version is tried), an
+entry that cannot be bounded, and the round limit.
+
 ## Architecture
 
 ```mermaid
@@ -376,7 +580,11 @@ flowchart LR
     SPLIT --> CHECK["splitreport: git apply --check, blob proof, split.json"]
     GIT --> TC["toolchain: files, dated stable table, MSRV and edition floors"]
     TC --> REG["registry: offline digest table, or cache + registry HEAD"]
-    REG --> DF["dockerfile: pinned rust:X-slim, rustup steps, non-root, CARGO_BUILD_JOBS=2"]
+    GIT --> LOCK["lockstage: committed Cargo.lock, generated, or date-bounded"]
+    LOCK --> PIN["deps + crateindex + semver: pin loop over sparse index metadata"]
+    REG --> DF["dockerfile: pinned rust:X-slim, toolchain stage, vendoring, CARGO_BUILD_JOBS=2"]
+    LOCK --> DF
+    PIN -->|session in the toolchain stage| BE
     CHECK --> OV["overlays: apply on host, capture each stage's files"]
     DF --> BE{"backend"}
     OV --> BE
@@ -384,7 +592,7 @@ flowchart LR
     BE -->|ReplayBackend| REC["recorded transcript, digests checked"]
     RUN --> LT["libtest parser and flip rules"]
     REC --> LT
-    LT --> OUT["task.json, toolchain.json, Dockerfile, patches, logs"]
+    LT --> OUT["task.json, toolchain.json, lock.json, Cargo.lock, Dockerfile, patches, logs"]
 ```
 
 | Module | Role |
@@ -399,26 +607,36 @@ flowchart LR
 | `toolchain.py` | stable release table, toolchain files, channels, MSRV and edition floors, decisions |
 | `registry.py` | image digests: offline table, JSON cache, registry HTTP API v2 client |
 | `toolchainreport.py` | toolchain inference for a commit pair and the `toolchain.json` document |
-| `dockerfile.py` | deterministic environment Dockerfile from a `Recipe`, rustup steps included |
-| `backend.py` | Docker, recording and replay backends; file overlays as tar streams |
+| `semver.py` | cargo's version requirement syntax and semver precedence |
+| `lockfile.py` | `Cargo.lock` v1 to v4: format detection, packages, dependency edges |
+| `crateindex.py` | crates.io sparse index entries: live with a cache, or a recorded directory |
+| `deps.py` | manifest requirements, the date-bounded pin loop, cargo scripts for a session |
+| `lockstage.py` | lock strategy, pin loop in the toolchain stage, `lock.json`, image tags |
+| `dockerfile.py` | deterministic environment Dockerfile from a `Recipe`: rustup, lock, vendor |
+| `backend.py` | Docker, recording and replay backends; sessions; file overlays as tar streams |
 | `libtest.py` | libtest text parser and the three-run flip classification |
 | `rewind.py` | the pipeline and the `task.json` document |
-| `cli.py` | Typer CLI: `split`, `toolchain`, `rewind`, `doctor`, `version` |
+| `cli.py` | Typer CLI: `split`, `toolchain`, `lock`, `rewind`, `doctor`, `version` |
 
 ## Measured
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 260 passed, 1 Docker test deselected | `make cov` |
-| Line and branch coverage of `src/` | 98.39% (gate: 90%) | `make cov` |
-| Toolchain and registry tests | 72 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
-| Lexer, scanner, layout and split tests | 130 passed | `uv run pytest tests/test_rustlex.py tests/test_rustscan.py tests/test_layout.py tests/test_patchsplit.py tests/test_splitreport.py` |
-| Offline split of the demo fix, fresh work directory | 0.42 s wall | `rm -rf .cargorewind out && time make split-demo` |
+| Tests (no Docker) | 406 passed, 2 Docker tests deselected | `make cov` |
+| Line and branch coverage of `src/` | 98.71% (gate: 90%) | `make cov` |
+| Dependency tests (semver, lockfile, index, pin loop, lock stage) | 99 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
+| Toolchain and registry tests | 77 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
+| Lexer, scanner, layout and split tests (with the regression suite) | 159 passed | `uv run pytest tests/test_rustlex.py tests/test_rustscan.py tests/test_layout.py tests/test_patchsplit.py tests/test_splitreport.py tests/test_split_regressions.py` |
+| Offline split of the demo fix, fresh work directory | 0.44 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
-| Live Docker e2e test | 1 passed | `make e2e` |
+| Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs) | 2 passed, 12.2 s with a warm Docker cache | `time make e2e` |
 | Live e2e on GitHub Actions (amd64: pull, build, three runs) | 23 s step time | CI run [36631820323](https://github.com/vipul21435/cargorewind/actions/runs/36631820323), step "Live end-to-end rewind" |
-| Offline demo, fresh work directory | 0.54 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
-| Offline toolchain inference of the demo fix, fresh work directory | 0.21 s wall | `rm -rf .cargorewind out && time make toolchain-demo` |
+| Offline demo, fresh work directory | 0.60 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
+| Offline toolchain inference of the demo fix, fresh work directory | 0.22 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
+| Offline replay of the which-rs pin loop, fresh work directory | 0.28 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
+| First live pin loop on which-rs `e776ff0`, including the rust:1.73.0-slim pull | 2 min 4 s wall; 41 crates.io packages, 32 late, 16 pins in 4 rounds | `time uv run cargorewind lock <which-rs clone> e776ff0 --registry --cache-dir <dir>` |
+| Live vendored rewind of which-rs `e776ff0` (toolchain stage cached, final stage built) | 19.2 s wall; 27 crates vendored, 19 tests pass offline in all 3 runs | `time uv run cargorewind rewind <which-rs clone> --fix e776ff0 --vendor --registry --cache-dir <dir>` |
+| Committed-lockfile check of which-rs `17fde4a`, including the clone | 1.85 s wall | `time uv run cargorewind lock https://github.com/harryfei/which-rs 17fde4a` |
 | Toolchain inference of bevy_cli `e19ba4e568` with live registry lookup, fresh clone | 4.17 s wall | `time uv run cargorewind toolchain https://github.com/TheBevyFlock/bevy_cli e19ba4e568 --registry --cache-dir <dir>` |
 | Dated nightly Dockerfile (`nightly-2020-01-01` + rustfmt), including the rust:1.98.1-slim pull | 2 min 7 s build | `time docker build` of the rendered Dockerfile (see "Toolchain inference") |
 | First live run, including the rust:1.39.0-slim pull | 1 min 55 s wall | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/demo-live --record ...` |
@@ -433,7 +651,8 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 
 - **The host never runs cargo.** Every `docker` and `git` call goes through one
   `Runner`, so unit tests use a fake runner or throwaway git repositories and never
-  need Docker. One `docker`-marked test runs the live path, and CI runs it.
+  need Docker. Two `docker`-marked tests run the live paths (the strsim-rs flip and
+  the which-rs pin loop with a vendored build), and CI runs them.
 - **Three runs, not two.** A test patch that calls a function only the fix adds makes
   the before run fail to compile, and then every test looks like it failed. The base
   run tells existing passing tests (PASS_TO_PASS) apart from real new failures.
@@ -468,15 +687,52 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   `make demo` and the unit tests fully offline and deterministic. `--registry` fills
   the gaps with a HEAD request that costs no pull quota, and the cache makes the
   first answer stick.
-- **Demo crate.** rapidfuzz/strsim-rs (MIT, zero dependencies, compiles in seconds).
-  Its history up to the fix is bundled in `examples/strsim/strsim-rs.bundle` with its
-  license in `examples/strsim/LICENSE-strsim-rs`.
+- **Bound by publish time, not by resolution order.** The cutoff is the fix commit's
+  committer time, and an entry is late when its crates.io `pubtime` is at or after
+  it. Only the late entries that no other late entry depends on are pinned in a
+  round, because pinning a dependent first changes what its dependencies may be (an
+  older `rustix` stops pulling the newest `windows-sys` family, so those entries leave
+  the graph instead of needing pins). cargo itself does the rewriting with
+  `cargo update --precise`, so the lockfile stays in the format and resolution cargo
+  would write, and a pin cargo refuses is recorded and retried with the next older
+  version.
+- **The pin loop runs in the toolchain it will build with.** The lockfile format and
+  what cargo can parse depend on the cargo version, so the loop runs in a container of
+  the Dockerfile's `toolchain` stage (one session, so an old cargo clones the registry
+  index once), and the final stage copies the result in. A crate without crates.io
+  dependencies skips all of this: cargo writes its lockfile during the build.
+- **Lockfile formats are floors.** A committed `Cargo.lock` that the chosen toolchain
+  cannot read is handled like an MSRV: the stable toolchain is raised to the first
+  release whose notes introduce the format, and the decision says so.
+- **Demo crates.** rapidfuzz/strsim-rs (MIT, zero dependencies, compiles in seconds)
+  for the flip; harryfei/which-rs (MIT, a handful of small dependencies, no committed
+  lockfile at `e776ff0`) for the date-bounded lockfile. Their histories up to the fix
+  are bundled in `examples/strsim/` and `examples/which-rs/` with their licenses. The
+  which-rs demo ships the index files the live run read (`examples/which-rs/index/`,
+  trimmed by `tests/fixtures/crates-index/record.py --minimal` to the fields the pin
+  loop reads), so its replay needs no network.
 
 ## Known issues
 
-- Without a committed `Cargo.lock`, `cargo generate-lockfile` resolves the newest
-  versions, not versions published before the commit date. Old crates with
-  dependencies may then fail to build on the old toolchain.
+- Date bounding covers crates.io only. Git dependencies resolve to their branch head
+  when the lockfile is generated, alternate registries are skipped with a note, and
+  path dependencies outside the workspace add requirements the planner does not read
+  (cargo refuses a pin that breaks them, and the entry is reported).
+- Yanked versions are never picked, even when they were still live at the commit date:
+  the index only has today's yanked flag. The pin loop does not read `rust_version`,
+  so a version published before the commit that declares a newer `rust-version` than
+  the chosen toolchain is still picked. An index entry without `pubtime` counts as
+  late.
+- The pin loop's container and the image build fetch from crates.io; only the three
+  stage runs are network-isolated, and the bundle does not carry vendored sources.
+  `--vendor` writes the source replacement to the container user's
+  `~/.cargo/config.toml`, which a `[source]` table in the repository's own
+  `.cargo/config.toml` would override.
+- A fix commit that adds or changes `Cargo.lock` replaces the environment's lockfile
+  in the after run, which runs offline, so crates that only the new lockfile needs
+  are missing.
+- Toolchain-stage images (`cargorewind/toolchain-stage:<digest>`) are kept for reuse;
+  `make docker-prune` removes only this project's dangling images.
 - The split reads `cfg` predicates only. A `#[test]` function outside a `cfg(test)`
   region (rustc compiles it only for tests) counts as source code, and so does a
   `#[cfg_attr(test, path = "...")]` module.
@@ -485,7 +741,8 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   in the before run, which still counts as failing. Benches, examples and build
   scripts go to `fix.patch`, apart from their test-only lines.
 - A new source file keeps its test-only code in `fix.patch` (with a note), because
-  its `mod` declaration belongs to the fix.
+  its `mod` declaration belongs to the fix. So does a test-only module file that only
+  a new (or deleted) source file declares.
 - The module walk does not expand macros or `include!`. It does not follow a `#[path]`
   that leaves the directories of the changed files. It does not model the edition
   2015 rule that turns off target auto-discovery once any target of that kind is
@@ -496,9 +753,11 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   tests by exact name and no flaky-test detection by reruns. Test names are not
   qualified by test binary, so a name that appears in two binaries is merged (a
   failure wins).
-- Toolchain floors come from the root package and the root workspace's members only.
-  Path dependencies outside the workspace and the Cargo.lock format version are not
-  considered; lockfile format checks belong to slice 3.
+- Toolchain floors come from the root package, the root workspace's members and the
+  root `Cargo.lock` only. Path dependencies outside the workspace are not considered.
+  The lockfile floor is the release whose notes introduced the format (v2 1.41, v3
+  1.53, v4 1.78); some earlier cargo versions could already read v2 and v3, so the
+  raise can be higher than strictly needed.
 - A dated nightly or beta is never raised to a floor; only a warning is recorded. Its
   version is estimated as the stable minor of that day plus 2 (nightly) or plus 1
   (beta). That was right for `nightly-2020-01-01` (1.42.0-nightly) and
@@ -510,7 +769,7 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   rejected.
 - The registry lookup supports Docker Hub only. Cached answers never expire;
   deleting the cache file forces a new lookup. Offline, the digest table covers
-  8 versions, and other versions need `--registry` or `--image`.
+  9 versions, and other versions need `--registry` or `--image`.
 - The bundle does not contain the base source tree, and there is no `verify` command
   that rebuilds from a bundle alone. There is no recipe-hash build cache beyond
   Docker's own layer cache.
@@ -520,14 +779,12 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 
 Planned in [PLAN.md](PLAN.md), in order:
 
-1. Dependency reproducibility: lockfile format checks, a lockfile bounded by the
-   commit date from crates.io metadata, and `cargo vendor` for offline builds.
-2. Sanity probes (identifiers the fix adds must be absent at base) and a recipe-hash
+1. Sanity probes (identifiers the fix adds must be absent at base) and a recipe-hash
    build cache.
-3. Test selection by exact name, a JSON libtest parser for nightly, and flaky
+2. Test selection by exact name, a JSON libtest parser for nightly, and flaky
    detection by reruns.
-4. A versioned task bundle schema, a `verify` command, batch recipes and a second
-   crate in the e2e suite.
+3. A versioned task bundle schema, a `verify` command, batch recipes and a second
+   crate with a verified flip in the e2e suite.
 
 ## License
 

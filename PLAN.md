@@ -163,6 +163,92 @@ green, pushed, and the README describes it with real output.
   files are read at its base (first parent unless `--base`), the date rule uses its
   committer date.
 
+### Decisions made while fixing the slice 1 and 2 review findings (2026-09-30)
+
+- A package under a `tests` directory of an enclosing package or workspace that no
+  enclosing workspace lists is a fixture crate: its files, `Cargo.toml` and
+  `Cargo.lock` included, are test data of that package (`test.patch`). A fixture with
+  its own `[workspace]` table is still a fixture; a listed member stays a package.
+- Path conventions: a `tests` directory anywhere below the package root (also
+  `src/**/tests/`) means test data, checked before the `src/`, `benches/` and
+  `examples/` rules.
+- Item ends: block-like statements (`if`, `for`, `while`, `loop`, `match`, labeled
+  blocks, `unsafe {`) end at their brace unless `else` follows; `let`, `static`,
+  `const X`, `use` and `type` end at their semicolon; items with a body skip braces
+  inside `<...>` (tracked only in the header, with `->` not closing a generic); a
+  match arm whose body after `=>` is block-like ends at that body (plus its comma).
+- A plain `mod name;` whose file starts with `#![cfg(test)]` is a test-only region of
+  the declaring file (reported as `module-decl`), so the declaration and the file land
+  in the same patch. A test-only module file declared only by a new or deleted source
+  file stays in `fix.patch` with it, so `test.patch` never holds an orphan file or
+  leaves a dangling `mod` line.
+- The projection recomputes "No newline at end of file" markers per image: a base line
+  without a newline that gains lines after it in the intermediate tree is emitted as a
+  removed and an added line. A seeded random-edit test (10 seeds; the old projection
+  failed seeds 2 and 4) guards it.
+- `parse_diff` splits on `\n` only.
+- The work checkout is guarded by an `flock` (`.repo.lock` next to it), held by the
+  clone or fetch, `check_split` and `build_overlays`; the lock is reentrant per `Git`
+  object. `build_overlays` compares the patched tree with the fix commit again before
+  capturing overlays. Each rewind builds from its own temporary context directory.
+
+### Decisions made while building slice 3 (2026-09-30)
+
+- crates.io metadata comes from the sparse index (`https://index.crates.io`), one
+  request per crate: it now carries `pubtime` for every version (backfilled for old
+  ones), plus `yanked`, `rust_version` and dependencies. The crates.io web API is not
+  used (rate limits, one request per version for dependencies).
+- The cutoff is the fix commit's committer time (the same commit time the toolchain
+  rule uses); an entry is late when `pubtime >= cutoff` or unknown. Candidates are
+  non-yanked (today's flag; cargo refuses yanked versions anyway), not pre-releases
+  unless a requirement names one, published before the cutoff, and matching every
+  requirement on the entry: the member manifests for workspace members, the index
+  entry of each dependent's locked version (normal and build dependencies) otherwise.
+- Pin rounds: only late entries without late dependents are pinned in a round (falling
+  back to the rest when none of those can move), all in one session script, each with
+  its own exit status. A refused pin excludes that version for that entry and the next
+  round tries the next older one. At most 30 rounds; what is still late is reported
+  with a reason and `lock` exits 2.
+- `cargo update -p name:version --precise v`: the `name:version` spec form works on
+  every cargo (the `@` form only works on newer ones).
+- The pin loop runs cargo, not a Python resolver: cargo writes the lockfile in its own
+  format and resolution, and old cargo versions only need to understand their own
+  lockfiles. It runs in one long-lived container (`docker run -d ... sleep infinity`,
+  then `docker exec` per round), so an old cargo clones the git registry index once.
+- The Dockerfile gains a `toolchain` stage only for the date-bounded strategy: the stage
+  is built with `--target toolchain`, the loop runs in it, the lockfile is written into
+  the build context and the final stage copies it and runs `cargo fetch --locked`.
+  Committed lockfiles and crates without crates.io dependencies keep one stage (the
+  strsim-rs Dockerfile changed only in its comment; its transcript was re-recorded).
+- Lockfile formats: v1 when there is no `version` key and no per-package checksum (this
+  also covers lockfiles without registry packages, which every cargo reads), v2 with
+  per-package checksums, v3 and v4 from the `version` key; other values are errors.
+  The read floors follow the release notes: v2 1.41, v3 1.53 (as the slice text asks),
+  v4 1.78. They join the toolchain floors, so an unreadable committed lockfile raises a
+  stable toolchain (decision step `lockfile`, source `Cargo.lock`).
+- `--vendor`: `cargo vendor --locked ~/vendor > ~/.cargo/config.toml` in the image
+  (`config` below cargo 1.39, refused below 1.37), `ENV CARGO_NET_OFFLINE=true`, and
+  `--offline` on the warm build and every stage run. The configuration lives in the
+  container user's home (an ancestor of the checkout), so the checkout and the patches
+  are untouched.
+- Images are tagged `cargorewind/<repo>:<base12>-<sha256 of Dockerfile and lockfile>`
+  and toolchain stages `cargorewind/toolchain-stage:<sha256 of the Dockerfile>`, so
+  runs with different lockfiles never share a tag. Transcripts gain `build:<target>`
+  entries and `steps` keyed by session step name with a script digest (schema stays 1;
+  old transcripts replay unchanged).
+- Second demo crate: harryfei/which-rs (MIT) at `e776ff0` (2023-10-17, rust 1.73.0,
+  no Cargo.lock). The undated lockfile locks `home 0.5.12`, whose manifest cargo 1.73
+  cannot parse (edition 2024); the bounded one pins 16 of 41 entries in 4 rounds and
+  builds. Its history is bundled with its license; the index files the live run read
+  are committed, trimmed to the fields the pin loop reads (`record.py --minimal`,
+  428 KB), so `make lock-demo` replays offline. The commit changes no test, so it
+  demonstrates the environment, not a flip; the verified flip with dependencies stays
+  in slice 6. `rust:1.73.0-slim` joined the offline digest table (the digest the
+  registry returned for the live run).
+- `lock` takes the fix commit positionally like `toolchain`; `rewind` gains `--vendor`
+  and `--index-dir`. `task.json` keeps schema 1 and gains `lock_report` and
+  `vendored`; `lockfile` is now `committed`, `generated` or `date-bounded`.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
@@ -199,7 +285,7 @@ green, pushed, and the README describes it with real output.
 
 - [x] 1. Rust-aware patch split and `#[cfg(test)]` report
 - [x] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
-- [ ] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
+- [x] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
 - [ ] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
 - [ ] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
 - [ ] 6. Task bundle export, `verify` command and batch recipes with two-crate e2e
