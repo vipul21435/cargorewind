@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from cargorewind.layout import SourceTree, glob_match
+from cargorewind.lockfile import READ_MINIMUM, LockfileError, parse_lockfile
 
 STABLE_RELEASES: tuple[tuple[str, str], ...] = (
     ("1.0.0", "2015-05-15"),
@@ -593,6 +594,25 @@ def manifest_floors(tree: SourceTree, decisions: list[Decision]) -> list[Floor]:
     return floors
 
 
+def lockfile_floors(tree: SourceTree, decisions: list[Decision]) -> list[Floor]:
+    """The oldest cargo that reads the committed Cargo.lock, as a floor."""
+    text = tree.read("Cargo.lock")
+    if text is None:
+        decisions.append(Decision("lockfile", "none", "no Cargo.lock at the base commit"))
+        return []
+    try:
+        version = parse_lockfile(text).format_version
+    except LockfileError as exc:
+        raise ToolchainError(f"Cargo.lock: {exc}") from exc
+    minimum = READ_MINIMUM[version]
+    if minimum is None:
+        decisions.append(Decision("lockfile", "v1", "Cargo.lock format v1: every cargo reads it"))
+        return []
+    reason = f"Cargo.lock format v{version} needs cargo {_fmt(minimum)}+"
+    decisions.append(Decision("lockfile", f"v{version}", reason))
+    return [Floor("lockfile", minimum, reason)]
+
+
 # Resolution
 
 
@@ -659,7 +679,7 @@ def resolve_toolchain(tree: SourceTree, commit_time: datetime) -> Toolchain:
         source = file_name or ""
         decisions.append(Decision("channel", version, reason))
 
-    floors = manifest_floors(tree, decisions)
+    floors = manifest_floors(tree, decisions) + lockfile_floors(tree, decisions)
     if floors:
         top = max(floors, key=lambda f: f.version)
         if dated:
@@ -682,7 +702,9 @@ def resolve_toolchain(tree: SourceTree, commit_time: datetime) -> Toolchain:
             reason = f"raised from {version} to meet {_fmt(top.version)}: {top.reason}"
             decisions.append(Decision("raise", raised, reason))
             version = raised
-            source = {"msrv": "rust-version", "edition": "edition"}.get(top.step, "manifest")
+            source = {"msrv": "rust-version", "edition": "edition", "lockfile": "Cargo.lock"}.get(
+                top.step, "manifest"
+            )
         else:
             decisions.append(Decision("floor", _fmt(top.version), f"{version} meets every floor"))
 

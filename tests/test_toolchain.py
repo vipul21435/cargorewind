@@ -215,6 +215,7 @@ def test_resolve_by_release_date_without_files() -> None:
         ("manifest", "1 package(s)"),
         ("edition", "1.0.0"),
         ("msrv", "none"),
+        ("lockfile", "none"),
         ("floor", "1.0.0"),
     ]
     assert "edition 2015 (no edition key)" in chosen.decisions[3].reason
@@ -438,3 +439,43 @@ def test_toolchain_as_dict_lists_decisions() -> None:
         "outcome": "1.39.0",
         "reason": "newest stable before 2019-12-13 (1.39.0 released 2019-11-07)",
     }
+
+
+# Lockfile format floors
+
+
+@pytest.mark.parametrize(
+    ("lock", "outcome", "version", "source"),
+    [
+        ('[[package]]\nname = "a"\nversion = "0.1.0"\n', "v1", "1.39.0", "release-date"),
+        (
+            '[[package]]\nname = "a"\nversion = "0.1.0"\nchecksum = "00"\n',
+            "v2",
+            "1.41.0",
+            "Cargo.lock",
+        ),
+        ("version = 3\n", "v3", "1.53.0", "Cargo.lock"),
+        ("version = 4\n", "v4", "1.78.0", "Cargo.lock"),
+    ],
+)
+def test_lockfile_format_raises_the_toolchain_to_a_reader(
+    lock: str, outcome: str, version: str, source: str
+) -> None:
+    tree = MemoryTree({"Cargo.toml": '[package]\nname = "a"\n', "Cargo.lock": lock})
+    chosen = resolve_toolchain(tree, FIX_TIME)  # the date rule alone gives 1.39.0
+    assert ("lockfile", outcome) in steps(chosen)
+    assert (chosen.version, chosen.source) == (version, source)
+    if source == "Cargo.lock":
+        raise_step = next(d for d in chosen.decisions if d.step == "raise")
+        assert f"Cargo.lock format {outcome} needs cargo" in raise_step.reason
+
+
+def test_lockfile_floor_meets_a_newer_toolchain_and_rejects_unknown_formats() -> None:
+    later = datetime(2024, 6, 1, tzinfo=UTC)
+    tree = MemoryTree({"Cargo.toml": '[package]\nname = "a"\n', "Cargo.lock": "version = 3\n"})
+    chosen = resolve_toolchain(tree, later)
+    assert chosen.source == "release-date"
+    assert ("floor", "1.53.0") in steps(chosen)
+    for bad in ("version = 9\n", "[[package]\n", '[[package]]\nname = "x"\n'):
+        with pytest.raises(ToolchainError, match=r"Cargo\.lock"):
+            resolve_toolchain(MemoryTree({"Cargo.toml": "", "Cargo.lock": bad}), later)
