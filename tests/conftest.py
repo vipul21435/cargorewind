@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
+
+from cargorewind.runner import CommandResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -53,3 +55,34 @@ def make_repo(tmp_path: Path) -> Callable[[str], GitRepo]:
         return GitRepo(tmp_path / name)
 
     return factory
+
+
+class FakeRunner:
+    """Records every call and answers from scripted results matched by argv prefix."""
+
+    def __init__(self, script: list[tuple[tuple[str, ...], CommandResult]] | None = None) -> None:
+        self.script = list(script or [])
+        self.calls: list[dict[str, object]] = []
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        stdin: bytes | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        args = tuple(argv)
+        self.calls.append({"argv": args, "cwd": cwd, "stdin": stdin, "timeout": timeout})
+        for prefix, result in self.script:
+            if args[: len(prefix)] == prefix:
+                return CommandResult(
+                    args, result.returncode, result.stdout, result.stderr, result.timed_out
+                )
+        return CommandResult(args, 0, "", "")
+
+
+@pytest.fixture
+def fake_runner() -> FakeRunner:
+    return FakeRunner()

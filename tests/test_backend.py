@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import io
+import json
+import tarfile
+from pathlib import Path
+
+import pytest
+
+from cargorewind.backend import (
+    BuildResult,
+    DockerBackend,
+    Overlay,
+    RecordingBackend,
+    ReplayBackend,
+    ReplayError,
+    RunResult,
+    container_script,
+)
+from cargorewind.runner import CommandError, CommandResult
+from tests.conftest import FakeRunner
+
+
+def _context(tmp_path: Path, text: str = "FROM scratch\n") -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Dockerfile").write_text(text)
+    return tmp_path
+
+
+def test_overlay_tar_is_deterministic_and_complete() -> None:
+    overlay = Overlay({"src/lib.rs": b"fn a() {}\n", "tests/t.rs": b"x"}, {"tests/t.rs": 0o755})
+    tar_bytes = overlay.to_tar()
+    assert tar_bytes == Overlay(dict(overlay.files), dict(overlay.modes)).to_tar()
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tar:
+        members = {m.name: m for m in tar.getmembers()}
+        assert sorted(members) == ["src/lib.rs", "tests/t.rs"]
+        assert members["tests/t.rs"].mode == 0o755
+        assert members["src/lib.rs"].mtime == 0
+        extracted = tar.extractfile("src/lib.rs")
+        assert extracted is not None and extracted.read() == b"fn a() {}\n"
+
+
+def test_overlay_digest_tracks_content_modes_and_deletions() -> None:
+    a = Overlay({"f": b"1"})
+    assert a.digest() == Overlay({"f": b"1"}).digest()
+    assert a.digest() != Overlay({"f": b"2"}).digest()
+    assert a.digest() != Overlay({"f": b"1"}, {"f": 0o755}).digest()
+    assert a.digest() != Overlay({"f": b"1"}, deleted=("g",)).digest()
+
+
+def test_container_script() -> None:
+    assert container_script(Overlay()) == (
+        "cd /home/rewind/repo && exec cargo test --no-fail-fast 2>&1"
+    )
+    script = container_script(Overlay({"a.rs": b""}, deleted=("old file.rs",)))
+    assert script == (
+        "cd /home/rewind/repo && tar -xmf - && rm -f -- 'old file.rs' && "
+        "exec cargo test --no-fail-fast 2>&1"
+    )
+
+
+def test_docker_build_uses_label_and_returns_image_id(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        [
+            (("docker", "build"), CommandResult((), 0, "", "#1 DONE\n")),
+            (("docker", "image", "inspect"), CommandResult((), 0, "sha256:abc\n", "")),
+        ]
+    )
+    result = DockerBackend(runner, timeout=5).build(_context(tmp_path), "cargorewind/x:1")
+    assert result == BuildResult("sha256:abc", "#1 DONE\n")
+    build = runner.calls[0]
+    assert build["argv"] == (
+        "docker",
+        "build",
+        "--progress=plain",
+        "--label",
+        "project=cargorewind",
+        "-t",
+        "cargorewind/x:1",
+        ".",
+    )
+    assert build["cwd"] == tmp_path
+    assert build["timeout"] == 5
+
+
+def test_docker_build_failure_raises(tmp_path: Path) -> None:
+    runner = FakeRunner([(("docker", "build"), CommandResult((), 1, "", "error: no\n"))])
+    with pytest.raises(CommandError, match="error: no"):
+        DockerBackend(runner).build(_context(tmp_path), "t")
+
+
+def test_docker_run_streams_overlay_and_isolates_network() -> None:
+    runner = FakeRunner([(("docker", "run"), CommandResult((), 101, "test a ... FAILED\n", ""))])
+    overlay = Overlay({"src/lib.rs": b"x"})
+    result = DockerBackend(runner).run_tests("img", "before", overlay)
+    assert result == RunResult(101, "test a ... FAILED\n")
+    call = runner.calls[0]
+    argv = call["argv"]
+    assert isinstance(argv, tuple)
+    assert argv[:3] == ("docker", "run", "--rm")
+    assert argv[argv.index("--network") : argv.index("--network") + 2] == ("--network", "none")
+    assert "CARGO_NET_OFFLINE=true" in argv
+    assert call["stdin"] == overlay.to_tar()
+
+
+def test_docker_run_without_overlay_sends_no_stdin_and_kills_on_timeout() -> None:
+    runner = FakeRunner([(("docker", "run"), CommandResult((), 124, "", "", timed_out=True))])
+    result = DockerBackend(runner).run_tests("img", "base", Overlay())
+    assert result.timed_out
+    assert runner.calls[0]["stdin"] is None
+    assert runner.calls[1]["argv"][:3] == ("docker", "rm", "-f")  # type: ignore[index]
+
+
+class _StubBackend:
+    def build(self, context: Path, tag: str) -> BuildResult:
+        return BuildResult("sha256:img", "log")
+
+    def run_tests(self, tag: str, stage: str, overlay: Overlay) -> RunResult:
+        return RunResult(0, f"test {stage} ... ok\n")
+
+
+def test_record_then_replay_round_trip(tmp_path: Path) -> None:
+    context = _context(tmp_path / "ctx")
+    transcript = tmp_path / "rec" / "transcript.json"
+    recorder = RecordingBackend(_StubBackend(), transcript)
+    overlay = Overlay({"a": b"1"})
+    recorder.build(context, "t")
+    recorder.run_tests("t", "before", overlay)
+
+    data = json.loads(transcript.read_text())
+    assert data["schema"] == 1
+    assert data["build"]["image_id"] == "sha256:img"
+    assert data["runs"]["before"]["overlay_sha256"] == overlay.digest()
+
+    replay = ReplayBackend(transcript)
+    assert replay.build(context, "other-tag").image_id == "sha256:img"
+    assert replay.run_tests("t", "before", overlay) == RunResult(0, "test before ... ok\n")
+
+
+def test_replay_rejects_drifted_inputs(tmp_path: Path) -> None:
+    context = _context(tmp_path / "ctx")
+    transcript = tmp_path / "transcript.json"
+    recorder = RecordingBackend(_StubBackend(), transcript)
+    recorder.build(context, "t")
+    recorder.run_tests("t", "before", Overlay({"a": b"1"}))
+    replay = ReplayBackend(transcript)
+
+    with pytest.raises(ReplayError, match="files for stage"):
+        replay.run_tests("t", "before", Overlay({"a": b"2"}))
+    with pytest.raises(ReplayError, match="no recorded run"):
+        replay.run_tests("t", "after", Overlay())
+    (context / "Dockerfile").write_text("FROM other\n")
+    with pytest.raises(ReplayError, match="Dockerfile differs"):
+        replay.build(context, "t")
+
+
+def test_replay_rejects_bad_transcripts(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"schema": 99}))
+    with pytest.raises(ReplayError, match="schema"):
+        ReplayBackend(bad)
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"schema": 1, "build": None, "runs": {}}))
+    with pytest.raises(ReplayError, match="no recorded build"):
+        ReplayBackend(empty).build(_context(tmp_path / "c"), "t")
