@@ -12,10 +12,11 @@ from typing import Any
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
 from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, GitError, GitTree, open_checkout, repo_slug
+from cargorewind.gitops import Git, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
-from cargorewind.patchsplit import FileDiff, SplitResult, parse_diff, split_diff
+from cargorewind.patchsplit import SplitResult
 from cargorewind.runner import Runner
+from cargorewind.splitreport import require, resolve_commits, split_commit, touched
 from cargorewind.toolchain import Toolchain, base_image, resolve_toolchain
 
 TASK_SCHEMA = 1
@@ -89,6 +90,7 @@ class RewindReport:
                     if h.test_lines
                 ],
                 "notes": self.split.notes,
+                "report": "split.json",
             },
             "runs": {
                 name: {
@@ -104,10 +106,6 @@ class RewindReport:
             "still_failing": self.flip.still_failing,
             "verified": self.flip.verified,
         }
-
-
-def _touched(files: list[FileDiff]) -> list[str]:
-    return sorted({path for diff in files for path in diff.paths})
 
 
 def _snapshot(git: Git, paths: list[str]) -> Overlay:
@@ -130,11 +128,10 @@ def build_overlays(
 ) -> dict[str, Overlay]:
     """Apply the patches on the host checkout and capture each stage's files.
 
-    Also proves that test.patch applies at base, that fix.patch applies on top, and
-    that together they reproduce the fix commit for every touched path.
+    ``check_split`` has already proved that they apply and reproduce the fix commit.
     """
-    test_paths = _touched(split.test_files)
-    all_paths = _touched(split.test_files + split.fix_files)
+    test_paths = touched(split.test_files)
+    all_paths = touched(split.test_files + split.fix_files)
     git.checkout_clean(base)
     try:
         if split.test_files:
@@ -142,8 +139,6 @@ def build_overlays(
         before = _snapshot(git, test_paths)
         if split.fix_files:
             git.apply(patch_dir / "fix.patch")
-        if not git.matches(fix, all_paths):
-            raise GitError("test.patch + fix.patch do not reproduce the fix commit")
         after = _snapshot(git, all_paths)
     finally:
         git.checkout_clean(base)
@@ -153,25 +148,10 @@ def build_overlays(
 def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -> RewindReport:
     out, workdir = options.out, options.workdir
     git = open_checkout(runner, options.source, workdir)
-    fix = git.rev_parse(options.fix)
-    base = git.rev_parse(options.base) if options.base else git.first_parent(fix)
-    commit_time = git.commit_date(fix)
-    log(f"base      {base[:12]}{'' if options.base else ' (first parent of fix)'}")
-    log(f"fix       {fix[:12]}  committed {commit_time.isoformat()}")
-
-    files = parse_diff(git.diff(base, fix))
-    split = split_diff(files, GitTree(git, base), GitTree(git, fix))
-    log(
-        f"split     test.patch {len(split.test_files)} file(s), "
-        f"fix.patch {len(split.fix_files)} file(s)"
-    )
-    for hunk in split.shared_hunks:
-        log(
-            f"shared    {hunk.path} {hunk.header}: "
-            f"{hunk.test_lines} test line(s), {hunk.fix_lines} fix line(s)"
-        )
-    for note in split.notes:
-        log(f"note      {note}")
+    commits = resolve_commits(git, options.fix, options.base, log)
+    base, fix, commit_time = commits.base, commits.fix, commits.commit_time
+    split, checks = split_commit(commits, options.source, out, log)
+    require(checks)
 
     toolchain = resolve_toolchain(lambda name: git.show_file(base, name), commit_time)
     image = options.image or base_image(toolchain.version)
@@ -180,9 +160,6 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     log(f"image     {image}")
     log(f"lockfile  {'committed: cargo fetch --locked' if has_lockfile else 'none: generated'}")
 
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "test.patch").write_text(split.test_patch)
-    (out / "fix.patch").write_text(split.fix_patch)
     dockerfile = render_dockerfile(Recipe(image, toolchain.version, base, has_lockfile))
     (out / "Dockerfile").write_text(dockerfile)
 

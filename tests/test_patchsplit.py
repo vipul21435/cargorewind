@@ -15,6 +15,7 @@ from cargorewind.patchsplit import (
     split_diff,
 )
 from cargorewind.runner import SubprocessRunner
+from cargorewind.splitreport import check_split
 from tests.conftest import GitRepo
 
 BASE_LIB = """\
@@ -408,9 +409,9 @@ def test_role_fixture_diffs_split_and_round_trip(
     if "src/extra.rs" in expected:
         assert split.notes == ["src/extra.rs: new file with test-only code kept whole in fix.patch"]
 
-    git.checkout_clean(base)
-    for name, text in (("test.patch", split.test_patch), ("fix.patch", split.fix_patch)):
-        if text:
-            (tmp_path / name).write_text(text)
-            git.apply(tmp_path / name)
-    assert git.matches(fix, sorted({p for d in files for p in d.paths}))
+    (tmp_path / "test.patch").write_text(split.test_patch)
+    (tmp_path / "fix.patch").write_text(split.fix_patch)
+    checks = check_split(git, base, fix, split, tmp_path)
+    assert checks.ok, checks.error()
+    assert checks.test_patch_applies is (True if split.test_files else None)
+    assert checks.fix_patch_applies is (True if split.fix_files else None)

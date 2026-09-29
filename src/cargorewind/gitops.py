@@ -99,6 +99,11 @@ class Git:
         if not result.ok:
             raise GitError(f"patch does not apply: {patch.name}\n{result.stderr.strip()}")
 
+    def apply_check(self, patch: Path) -> tuple[bool, str]:
+        """``git apply --check``: whether ``patch`` applies to the working tree, and why not."""
+        result = self._run("apply", "--check", "--whitespace=nowarn", str(patch.resolve()))
+        return result.ok, result.stderr.strip()
+
     def matches(self, rev: str, paths: list[str]) -> bool:
         """True when the working tree equals ``rev`` for every path in ``paths``.
 

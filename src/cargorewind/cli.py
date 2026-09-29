@@ -16,10 +16,11 @@ from cargorewind.backend import (
     ReplayBackend,
     ReplayError,
 )
-from cargorewind.gitops import GitError, repo_slug
+from cargorewind.gitops import GitError, open_checkout, repo_slug
 from cargorewind.patchsplit import PatchError
 from cargorewind.rewind import RewindOptions, RewindReport, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
+from cargorewind.splitreport import resolve_commits, split_commit
 from cargorewind.toolchain import ToolchainError
 
 app = typer.Typer(
@@ -75,7 +76,39 @@ def _print_summary(report: RewindReport, out: Path) -> None:
         typer.echo(f"still failing {len(flip.still_failing)}: {', '.join(flip.still_failing)}")
     verdict = "VERIFIED" if flip.verified else "NOT VERIFIED"
     typer.echo(f"verdict       {verdict} fail-to-pass flip")
-    typer.echo(f"bundle        {out}/ (task.json, Dockerfile, test.patch, fix.patch, logs/)")
+    typer.echo(
+        f"bundle        {out}/ (task.json, split.json, Dockerfile, test.patch, fix.patch, logs/)"
+    )
+
+
+@app.command("split")
+def split_command(
+    source: Annotated[str, typer.Argument(help="Git URL, local repository or git bundle.")],
+    fix: Annotated[str, typer.Option("--fix", help="The fix commit (full or short SHA).")],
+    base: Annotated[
+        str | None, typer.Option("--base", help="Base commit (default: first parent of fix).")
+    ] = None,
+    out: Annotated[
+        Path, typer.Option("--out", help="Directory for test.patch, fix.patch, split.json.")
+    ] = Path("out/split"),
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", help="Checkout directory (default: .cargorewind/)."),
+    ] = None,
+) -> None:
+    """Split a fix commit into test.patch and fix.patch by Cargo layout role (no Docker)."""
+    try:
+        workdir = workdir or Path(".cargorewind") / repo_slug(source)
+        git = open_checkout(SubprocessRunner(), source, workdir)
+        commits = resolve_commits(git, fix, base, typer.echo)
+        _, checks = split_commit(commits, source, out, typer.echo, verbose=True)
+    except (CommandError, GitError, PatchError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"wrote     {out}/ (test.patch, fix.patch, split.json)")
+    if not checks.ok:
+        typer.echo(f"error: {checks.error()}", err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command("rewind")

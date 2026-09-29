@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test cov demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
+.PHONY: install lint format typecheck test cov demo split-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
 
 IMAGE ?= cargorewind:dev
 DEMO_ARGS = examples/strsim/strsim-rs.bundle --fix 605c81c9b9
@@ -26,6 +26,10 @@ cov:
 # Offline: replays the recorded Docker runs of the strsim-rs fix (no Docker needed).
 demo:
 	uv run cargorewind rewind $(DEMO_ARGS) --out out/demo --replay examples/strsim/transcript.json
+
+# Offline: split the strsim-rs fix into test.patch and fix.patch and write split.json.
+split-demo:
+	uv run cargorewind split $(DEMO_ARGS) --out out/split
 
 # Live: builds the rust:1.39.0-slim environment and runs the three test stages in Docker.
 demo-live:

@@ -97,6 +97,10 @@ def test_rewind_synthetic_crate_end_to_end(
     hunk = task["split"]["cfg_test_hunks"][0]
     assert (hunk["test_lines"], hunk["fix_lines"]) == (5, 2)
     assert task["split"]["test_files"] == task["split"]["fix_files"] == ["src/lib.rs"]
+    assert task["split"]["report"] == "split.json"
+    split_doc = json.loads((out / "split.json").read_text())
+    assert split_doc["checks"]["patches_reproduce_fix"] is True
+    assert split_doc["files"][0]["role"] == "source"
     assert task["runs"]["before"] == {
         "exit_code": 101,
         "timed_out": False,
