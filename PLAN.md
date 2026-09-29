@@ -81,6 +81,38 @@ green, pushed, and the README describes it with real output.
 - CI's docker job runs the replayed demo, the demo inside the CLI image, and the live
   `docker`-marked e2e test (pull, build and three runs took 23 s on ubuntu-24.04).
 
+### Decisions made while building slice 1 (2026-09-30)
+
+- The lexer is hand-written (no tree-sitter or other native dependency). The scanner
+  needs attributes, `mod` items and balanced delimiters, never full syntax trees, and
+  every literal form that can hide a brace is covered by edge-case tests.
+- "Test-only" means the cfg predicate implies `test` or `doctest`: `all(...)` when any
+  argument does, `any(...)` when every argument does, `not(...)` never. Several `cfg`
+  attributes on one item are a conjunction.
+- An attributed item ends at a top-level `;` or at the `}` that closes its body. A
+  field, variant, match arm or statement that does not start with an item keyword
+  also ends at a top-level comma, and at a closing `}` unless an operator follows.
+- Module files are resolved with rustc's rules: `name.rs` or `name/mod.rs` next to a
+  mod-rs file (crate roots, `mod.rs`), under `stem/` for other files, with inline
+  module names as directories, and `#[path]` files treated as mod-rs files (as rustc
+  does). The walk only descends into directories that lead to a changed file.
+- A file reached by several targets reports the most "production" role (source, build
+  script, bench, example, test); it is test code as a whole only if every way it is
+  compiled is test-only. Files in the directory of a custom target root (for example
+  data next to `[[test]] path = "checks/it.rs"`) share that target's role.
+- Benches, examples, build scripts, manifests, lockfiles and other files go to
+  `fix.patch`; test-only lines inside Rust files of any role still go to `test.patch`.
+  A new source file stays whole in `fix.patch`, because its `mod` line is fix code.
+- `shared_hunks` now lists every hunk of a file that lands in both patches, including
+  hunks with only fix lines, so `split.json` shows the whole file. `split.json` lists
+  only the packages that contain changed files, plus the total count.
+- `rewind` runs the same `git apply --check` proof as `split`, writes `split.json` into
+  the bundle and stops before Docker when a check fails. `task.json` keeps schema 1
+  and gains `split.report`.
+- Not done in this slice (listed under Known issues in the README): treating `#[test]`
+  functions outside `cfg(test)` as test code, splitting `[dev-dependencies]` manifest
+  hunks into `test.patch`, and macro-generated modules.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
@@ -115,7 +147,7 @@ green, pushed, and the README describes it with real output.
 
 ## Slices
 
-- [ ] 1. Rust-aware patch split and `#[cfg(test)]` report
+- [x] 1. Rust-aware patch split and `#[cfg(test)]` report
 - [ ] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
 - [ ] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
 - [ ] 4. Dockerfile generation with sanity probes and a recipe-hash build cache

@@ -35,7 +35,7 @@ def kinds(src: str) -> list[tuple[TokenKind, str]]:
         ("'\\x7b'", [(L, "'\\x7b'")]),
         ("b'{'", [(L, "b'{'")]),
         ("b'\\''", [(L, "b'\\''")]),
-        ("'é'", [(L, "'é'")]),
+        ("'\u00e9'", [(L, "'\u00e9'")]),
         # Lifetimes and labels are not char literals.
         ("&'a str", [(P, "&"), (T, "'a"), (ID, "str")]),
         ("'static", [(T, "'static")]),
@@ -93,7 +93,7 @@ def test_unterminated_input_runs_to_the_end(src: str, last: str) -> None:
 
 def test_shebang_and_bom_are_skipped_but_inner_attributes_are_not() -> None:
     assert [t.text for t in tokenize("#!/usr/bin/env run\nfn")] == ["fn"]
-    assert [t.text for t in tokenize("﻿fn")] == ["fn"]
+    assert [t.text for t in tokenize("\ufefffn")] == ["fn"]
     assert [t.text for t in tokenize("#![cfg(test)]")][:3] == ["#", "!", "["]
 
 
