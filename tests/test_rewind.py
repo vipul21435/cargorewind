@@ -109,6 +109,10 @@ def test_rewind_synthetic_crate_end_to_end(
         "ignored": 0,
     }
     assert "RUN cargo fetch --locked" in backend.dockerfile
+    # The checkout carries rust-toolchain, so rustup must not follow it at run time.
+    assert "ENV RUSTUP_TOOLCHAIN=1.70.0" in backend.dockerfile
+    assert task["toolchain"]["toolchain_file"] == "rust-toolchain"
+    assert [d["step"] for d in task["toolchain"]["decisions"]][:2] == ["file", "channel"]
     assert (out / "Dockerfile").read_text() == backend.dockerfile
     assert (out / "logs" / "before.log").read_text().endswith("FAILED\n")
 

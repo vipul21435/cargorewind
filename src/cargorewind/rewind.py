@@ -12,7 +12,7 @@ from typing import Any
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
 from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, open_checkout, repo_slug
+from cargorewind.gitops import Git, GitTree, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.patchsplit import SplitResult
 from cargorewind.runner import Runner
@@ -66,11 +66,7 @@ class RewindReport:
             "base_commit": self.base,
             "fix_commit": self.fix,
             "commit_date": self.commit_date,
-            "toolchain": {
-                "version": self.toolchain.version,
-                "source": self.toolchain.source,
-                "reason": self.toolchain.reason,
-            },
+            "toolchain": self.toolchain.as_dict(),
             "image": self.image,
             "lockfile": "committed" if self.has_lockfile else "generated",
             "test_command": " ".join(TEST_COMMAND),
@@ -106,6 +102,21 @@ class RewindReport:
             "still_failing": self.flip.still_failing,
             "verified": self.flip.verified,
         }
+
+
+def recipe_for(image: str, toolchain: Toolchain, base: str, has_lockfile: bool) -> Recipe:
+    """The Dockerfile recipe of a resolved toolchain."""
+    return Recipe(
+        image,
+        toolchain.version,
+        base,
+        has_lockfile,
+        install_toolchain=toolchain.install,
+        components=toolchain.components,
+        targets=toolchain.targets,
+        profile=toolchain.profile,
+        pin_toolchain=toolchain.toolchain_file is not None,
+    )
 
 
 def _snapshot(git: Git, paths: list[str]) -> Overlay:
@@ -153,14 +164,14 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     split, checks = split_commit(commits, options.source, out, log)
     require(checks)
 
-    toolchain = resolve_toolchain(lambda name: git.show_file(base, name), commit_time)
-    image = options.image or base_image(toolchain.version)
+    toolchain = resolve_toolchain(GitTree(git, base), commit_time)
+    image = options.image or base_image(toolchain.image_version)
     has_lockfile = git.show_file(base, "Cargo.lock") is not None
     log(f"toolchain {toolchain.version}: {toolchain.reason}")
     log(f"image     {image}")
     log(f"lockfile  {'committed: cargo fetch --locked' if has_lockfile else 'none: generated'}")
 
-    dockerfile = render_dockerfile(Recipe(image, toolchain.version, base, has_lockfile))
+    dockerfile = render_dockerfile(recipe_for(image, toolchain, base, has_lockfile))
     (out / "Dockerfile").write_text(dockerfile)
 
     overlays = build_overlays(git, base, fix, split, out)

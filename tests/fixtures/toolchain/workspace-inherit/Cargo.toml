@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["crates/legacy"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.74"
+
+[workspace.dependencies]
+itoa = "1"

@@ -20,6 +20,42 @@ class Recipe:
     toolchain: str
     base_commit: str
     has_lockfile: bool
+    install_toolchain: bool = False  # a dated channel installed with rustup
+    components: tuple[str, ...] = ()
+    targets: tuple[str, ...] = ()
+    profile: str | None = None
+    pin_toolchain: bool = False  # ENV RUSTUP_TOOLCHAIN, so toolchain files are ignored
+
+
+def _toolchain_lines(recipe: Recipe) -> list[str]:
+    """Root-level rustup steps; empty for a plain stable image without a toolchain file."""
+    name = recipe.toolchain
+    lines: list[str] = []
+    if recipe.install_toolchain:
+        flags = [f"--profile {recipe.profile or 'minimal'}"]
+        flags += [f"--component {c}" for c in recipe.components]
+        flags += [f"--target {t}" for t in recipe.targets]
+        lines += [
+            f"# Dated channel {name}: installed with rustup on the pinned stable image.",
+            f"RUN rustup toolchain install {name} {' '.join(flags)}",
+        ]
+    else:
+        steps = []
+        if recipe.components:
+            steps.append(f"rustup component add --toolchain {name} {' '.join(recipe.components)}")
+        if recipe.targets:
+            steps.append(f"rustup target add --toolchain {name} {' '.join(recipe.targets)}")
+        if steps:
+            lines += [
+                "# Components and targets the toolchain file asks for.",
+                "RUN " + " \\\n    && ".join(steps),
+            ]
+    if recipe.pin_toolchain or recipe.install_toolchain:
+        lines += [
+            "# Pin the chosen toolchain; rustup would otherwise follow the toolchain file.",
+            f"ENV RUSTUP_TOOLCHAIN={name}",
+        ]
+    return lines
 
 
 def render_dockerfile(recipe: Recipe) -> str:
@@ -44,6 +80,7 @@ def render_dockerfile(recipe: Recipe) -> str:
         "    CARGO_INCREMENTAL=0 \\",
         "    CARGO_TERM_COLOR=never \\",
         f"    CARGO_TARGET_DIR={TARGET_DIR}",
+        *_toolchain_lines(recipe),
         f"RUN useradd --create-home --uid {CONTAINER_UID} {CONTAINER_USER}",
         f"USER {CONTAINER_USER}",
         f"WORKDIR {REPO_DIR}",

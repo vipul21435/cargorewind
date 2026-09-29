@@ -1,0 +1,4 @@
+[package]
+name = "legacy"
+version = "0.1.0"
+rust-version = "1.90"
