@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint, typecheck, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: Install
+        run: make install
+      - name: Lint
+        run: make lint
+      - name: Typecheck
+        run: make typecheck
+      - name: Tests with coverage gate
+        run: make cov
+
+  docker:
+    name: docker build and demo
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.29"
+          enable-cache: true
+      - name: Install
+        run: make install
+      - name: Build image and run the CLI in it
+        run: make docker-demo IMAGE=cargorewind:ci
+      - name: Demo
+        run: make demo
