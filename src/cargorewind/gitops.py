@@ -73,6 +73,11 @@ class Git:
         result = self._run("show", f"{rev}:{path}")
         return result.stdout if result.ok else None
 
+    def list_files(self, rev: str) -> list[str]:
+        """Every file path in the tree of ``rev``."""
+        out = self._out("ls-tree", "-r", "-z", "--name-only", rev)
+        return [path for path in out.split("\0") if path]
+
     def archive(self, rev: str, dest: Path) -> None:
         """Extract the tree of ``rev`` (no .git) into ``dest``."""
         dest.mkdir(parents=True, exist_ok=True)
@@ -113,6 +118,23 @@ class Git:
             hashes = self._out("hash-object", "--", *on_disk).split()
             actual = dict(zip(on_disk, hashes, strict=True))
         return actual == expected
+
+
+class GitTree:
+    """One commit of a repository as a read-only ``SourceTree``."""
+
+    def __init__(self, git: Git, rev: str) -> None:
+        self.git = git
+        self.rev = rev
+        self._paths: frozenset[str] | None = None
+
+    def read(self, path: str) -> str | None:
+        return self.git.show_file(self.rev, path)
+
+    def paths(self) -> frozenset[str]:
+        if self._paths is None:
+            self._paths = frozenset(self.git.list_files(self.rev))
+        return self._paths
 
 
 def open_checkout(runner: Runner, source: str, workdir: Path) -> Git:

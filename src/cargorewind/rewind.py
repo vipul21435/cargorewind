@@ -12,7 +12,7 @@ from typing import Any
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
 from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, GitError, open_checkout, repo_slug
+from cargorewind.gitops import Git, GitError, GitTree, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.patchsplit import FileDiff, SplitResult, parse_diff, split_diff
 from cargorewind.runner import Runner
@@ -85,7 +85,8 @@ class RewindReport:
                         "test_lines": h.test_lines,
                         "fix_lines": h.fix_lines,
                     }
-                    for h in self.split.shared_hunks
+                    for h in self.split.hunks
+                    if h.test_lines
                 ],
                 "notes": self.split.notes,
             },
@@ -159,15 +160,15 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     log(f"fix       {fix[:12]}  committed {commit_time.isoformat()}")
 
     files = parse_diff(git.diff(base, fix))
-    split = split_diff(files, lambda p: git.show_file(base, p), lambda p: git.show_file(fix, p))
+    split = split_diff(files, GitTree(git, base), GitTree(git, fix))
     log(
         f"split     test.patch {len(split.test_files)} file(s), "
         f"fix.patch {len(split.fix_files)} file(s)"
     )
     for hunk in split.shared_hunks:
         log(
-            f"cfg(test) {hunk.path} hunk @@ -{hunk.old_start} +{hunk.new_start}: "
-            f"{hunk.test_lines} test line(s) to test.patch, {hunk.fix_lines} to fix.patch"
+            f"shared    {hunk.path} {hunk.header}: "
+            f"{hunk.test_lines} test line(s), {hunk.fix_lines} fix line(s)"
         )
     for note in split.notes:
         log(f"note      {note}")

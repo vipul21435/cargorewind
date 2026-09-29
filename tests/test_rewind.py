@@ -145,7 +145,8 @@ def test_rewind_replays_the_bundled_strsim_demo(tmp_path: Path) -> None:
     assert len(report.flip.pass_to_pass) == 102
     assert report.toolchain.version == "1.39.0"
     assert report.split.shared_files == ["src/lib.rs"]
-    assert [h.test_lines for h in report.split.shared_hunks] == [5, 5]
+    assert [h.test_lines for h in report.split.shared_hunks] == [0, 5, 5]
+    assert [h.fix_lines for h in report.split.shared_hunks] == [6, 0, 0]
     assert "@@ -72,9 +72,11 @@" in (out / "fix.patch").read_text()
     assert "fn jaro_same_one_character" in (out / "test.patch").read_text()
     assert "RUN cargo generate-lockfile" in (out / "Dockerfile").read_text()
