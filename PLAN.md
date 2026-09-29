@@ -46,9 +46,44 @@ green, pushed, and the README describes it with real output.
 - The confidential-name guard is a local pre-push hook only (installed into
   `.git/hooks`); nothing about it is tracked in this repository.
 
+### Decisions made while building the core (2026-09-30)
+
+- Three runs instead of two: base (no patches), before (test patch), after (both).
+  When the before run fails to compile, the base run decides whether an existing test
+  is PASS_TO_PASS, so a compile error does not inflate FAIL_TO_PASS. Regressions
+  (passed before, or passed at base and fail after) block verification.
+- Patches are applied on the host with `git apply`, the result is checked blob by blob
+  against the fix commit, and each stage's changed files are streamed into
+  `docker run -i --network none` as a deterministic tar (`tar -xm` gives fresh mtimes
+  so cargo rebuilds them). Old `rust:*-slim` images have no git or `patch`, and
+  installing them from archived Debian releases is fragile.
+- The patch split already works line by line (not only hunk by hunk): changes of the
+  other side become context or are dropped, and hunk ranges are recomputed for the
+  intermediate tree. The core scan blanks comments, nested block comments, strings,
+  raw strings and char literals; slice 1 still owns out-of-line `mod tests;`,
+  `cfg(all(test, ...))`, item-level `#[cfg(test)]` and Cargo.toml target paths.
+- Toolchain precedence follows rustup: when both `rust-toolchain` and
+  `rust-toolchain.toml` exist, the legacy file wins. The stable table (140 releases,
+  1.0.0 to 1.98.1) is parsed from rust-lang/rust `RELEASES.md`; "before the commit
+  date" means released on an earlier UTC day than the fix's committer date.
+- The commit date used is the fix commit's committer date in UTC.
+- Doctest names drop the `(line N)` suffix and get a per-item ordinal, because a fix
+  that adds lines above a doctest would otherwise rename it and misreport it.
+- Replay transcripts store the sha256 of the Dockerfile and of each stage's overlay;
+  replay refuses to answer when they differ. `make demo` replays the transcript
+  recorded from a live run on this Mac (`make record-demo` regenerates it).
+- The demo bundle is the full strsim-rs history up to `605c81c9b9` (about 650 KB,
+  mostly old rendered docs and fonts), so the pre-commit large-file limit is raised
+  to 1024 KB. The pre-commit end-of-file fixer added a trailing newline to the copied
+  strsim-rs LICENSE; the text is otherwise verbatim.
+- The CLI image copies the static docker CLI from `docker:29.3.1-cli` (pinned by
+  digest) and installs git from Debian, so it can drive a mounted Docker socket.
+- CI's docker job runs the replayed demo, the demo inside the CLI image, and the live
+  `docker`-marked e2e test (pull, build and three runs took 23 s on ubuntu-24.04).
+
 ## Core (deliverable)
 
-- [ ] Core: the smallest end-to-end rewind of one fix commit.
+- [x] Core: the smallest end-to-end rewind of one fix commit.
 
 `cargorewind rewind <repo-url-or-path> --fix <sha> [--base <sha>] --out <dir>` does:
 
