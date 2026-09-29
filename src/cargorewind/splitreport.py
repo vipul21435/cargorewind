@@ -84,21 +84,25 @@ def _apply_checked(git: Git, patch: Path) -> tuple[bool, str]:
 
 
 def check_split(git: Git, base: str, fix: str, split: SplitResult, patch_dir: Path) -> SplitChecks:
-    """``git apply --check`` test.patch at base, then fix.patch on top, then compare blobs."""
-    git.checkout_clean(base)
+    """``git apply --check`` test.patch at base, then fix.patch on top, then compare blobs.
+
+    Holds the checkout lock throughout, so a parallel run cannot move the working tree.
+    """
     test_ok: bool | None = None
     fix_ok: bool | None = None
     detail = ""
-    try:
-        if split.test_files:
-            test_ok, detail = _apply_checked(git, patch_dir / "test.patch")
-        if test_ok is not False and split.fix_files:
-            fix_ok, detail = _apply_checked(git, patch_dir / "fix.patch")
-        applied = test_ok is not False and fix_ok is not False
-        paths = touched(split.test_files + split.fix_files)
-        reproduces = applied and git.matches(fix, paths)
-    finally:
+    with git.lock:
         git.checkout_clean(base)
+        try:
+            if split.test_files:
+                test_ok, detail = _apply_checked(git, patch_dir / "test.patch")
+            if test_ok is not False and split.fix_files:
+                fix_ok, detail = _apply_checked(git, patch_dir / "fix.patch")
+            applied = test_ok is not False and fix_ok is not False
+            paths = touched(split.test_files + split.fix_files)
+            reproduces = applied and git.matches(fix, paths)
+        finally:
+            git.checkout_clean(base)
     return SplitChecks(test_ok, fix_ok, reproduces, detail)
 
 

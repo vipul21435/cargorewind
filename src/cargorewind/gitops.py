@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 import re
 import shutil
 import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
 
 from cargorewind.runner import CommandResult, Runner, checked
 
@@ -26,12 +29,58 @@ def repo_slug(source: str) -> str:
     return name or "repo"
 
 
+def lock_path(repo: Path) -> Path:
+    """The lock file that guards the working tree of the checkout at ``repo``."""
+    return repo.parent / f".{repo.name}.lock"
+
+
+class CheckoutLock:
+    """An exclusive ``flock`` on a work checkout, so parallel runs take turns.
+
+    Several ``split`` or ``rewind`` runs may share one checkout (the default work
+    directory is per repository). Every section that checks out, cleans, applies
+    patches or reads the working tree holds this lock. It is reentrant within one
+    object; separate objects (and processes) block each other.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._fd: int | None = None
+        self._depth = 0
+
+    def __enter__(self) -> CheckoutLock:
+        if self._depth == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except BaseException:
+                os.close(fd)
+                raise
+            self._fd = fd
+        self._depth += 1
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._depth -= 1
+        if self._depth == 0 and self._fd is not None:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+            self._fd = None
+
+
 class Git:
     """Thin typed wrapper over ``git -C <repo>`` driven through a ``Runner``."""
 
     def __init__(self, runner: Runner, repo: Path) -> None:
         self.runner = runner
         self.repo = repo
+        self.lock = CheckoutLock(lock_path(repo))
 
     def _run(self, *args: str) -> CommandResult:
         return self.runner.run(["git", "-C", str(self.repo), *args])
@@ -143,13 +192,19 @@ class GitTree:
 
 
 def open_checkout(runner: Runner, source: str, workdir: Path) -> Git:
-    """Clone ``source`` (URL, path or bundle) into ``workdir/repo``, or refresh it."""
+    """Clone ``source`` (URL, path or bundle) into ``workdir/repo``, or refresh it.
+
+    The clone or fetch holds the checkout lock, so parallel runs never clone into the
+    same directory or update its refs at the same time.
+    """
     repo_dir = workdir / "repo"
-    if (repo_dir / ".git").is_dir():
-        checked(runner.run(["git", "-C", str(repo_dir), "fetch", "--quiet", "origin"]))
-    else:
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir)
-        workdir.mkdir(parents=True, exist_ok=True)
-        checked(runner.run(["git", "clone", "--quiet", source, str(repo_dir)]))
-    return Git(runner, repo_dir)
+    git = Git(runner, repo_dir)
+    with git.lock:
+        if (repo_dir / ".git").is_dir():
+            checked(runner.run(["git", "-C", str(repo_dir), "fetch", "--quiet", "origin"]))
+        else:
+            if repo_dir.exists():
+                shutil.rmtree(repo_dir)
+            workdir.mkdir(parents=True, exist_ok=True)
+            checked(runner.run(["git", "clone", "--quiet", source, str(repo_dir)]))
+    return git

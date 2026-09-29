@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
 from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, open_checkout, repo_slug
+from cargorewind.gitops import Git, GitError, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.patchsplit import SplitResult
 from cargorewind.registry import ImageChoice, ImageResolver
@@ -144,20 +145,25 @@ def build_overlays(
 ) -> dict[str, Overlay]:
     """Apply the patches on the host checkout and capture each stage's files.
 
-    ``check_split`` has already proved that they apply and reproduce the fix commit.
+    ``check_split`` has already proved that they apply and reproduce the fix commit; the
+    blob comparison is repeated on the tree the overlays are captured from, under the
+    checkout lock, so a parallel run can never leak into a bundle.
     """
     test_paths = touched(split.test_files)
     all_paths = touched(split.test_files + split.fix_files)
-    git.checkout_clean(base)
-    try:
-        if split.test_files:
-            git.apply(patch_dir / "test.patch")
-        before = _snapshot(git, test_paths)
-        if split.fix_files:
-            git.apply(patch_dir / "fix.patch")
-        after = _snapshot(git, all_paths)
-    finally:
+    with git.lock:
         git.checkout_clean(base)
+        try:
+            if split.test_files:
+                git.apply(patch_dir / "test.patch")
+            before = _snapshot(git, test_paths)
+            if split.fix_files:
+                git.apply(patch_dir / "fix.patch")
+            if not git.matches(fix, all_paths):
+                raise GitError("the patched checkout does not match the fix commit")
+            after = _snapshot(git, all_paths)
+        finally:
+            git.checkout_clean(base)
     return {"base": Overlay(), "before": before, "after": after}
 
 
@@ -184,15 +190,16 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
 
     overlays = build_overlays(git, base, fix, split, out)
 
-    context = workdir / "context"
-    if context.exists():
-        shutil.rmtree(context)
-    git.archive(base, context / "repo")
-    (context / "Dockerfile").write_text(dockerfile)
-
-    tag = f"cargorewind/{repo_slug(options.source)}:{base[:12]}"
-    log(f"build     {tag}")
-    built = backend.build(context, tag)
+    # A build context of its own: parallel runs of one repository share the work directory.
+    context = Path(tempfile.mkdtemp(prefix="context-", dir=workdir))
+    try:
+        git.archive(base, context / "repo")
+        (context / "Dockerfile").write_text(dockerfile)
+        tag = f"cargorewind/{repo_slug(options.source)}:{base[:12]}"
+        log(f"build     {tag}")
+        built = backend.build(context, tag)
+    finally:
+        shutil.rmtree(context, ignore_errors=True)
     logs = out / "logs"
     logs.mkdir(exist_ok=True)
     (logs / "build.log").write_text(built.log)

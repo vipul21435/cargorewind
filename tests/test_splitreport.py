@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cargorewind import cli
-from cargorewind.gitops import Git, GitError, GitTree
+from cargorewind.gitops import Git, GitError, GitTree, open_checkout
 from cargorewind.patchsplit import parse_diff, split_diff
 from cargorewind.runner import SubprocessRunner
 from cargorewind.splitreport import (
@@ -137,3 +138,45 @@ def test_split_command_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     failed = runner.invoke(cli.app, [*base_args, "--fix", "605c81c9b9", "--out", str(tmp_path)])
     assert failed.exit_code == 1
     assert "test.patch does not apply at base" in failed.output
+
+
+def test_parallel_splits_share_one_checkout(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    # Review finding: parallel runs on one work checkout broke each other's checks.
+    repo = make_repo("origin")
+    repo.commit(
+        "root",
+        {"Cargo.toml": '[package]\nname = "p"\n', "src/lib.rs": LIB},
+        "2024-01-09T12:00:00+00:00",
+    )
+    fixes: list[str] = []
+    for n in range(3):
+        text = LIB.replace("    1\n", f"    {n + 2}\n").replace("fn a() {}", f"fn a{n}() {{}}")
+        fixes.append(repo.commit(f"fix {n}", {"src/lib.rs": text}, "2024-01-10T12:00:00+00:00"))
+        repo.commit(f"reset {n}", {"src/lib.rs": LIB}, "2024-01-10T12:00:00+00:00")
+    workdir = tmp_path / "work"
+    open_checkout(SubprocessRunner(), str(repo.path), workdir)
+    results: dict[str, bool] = {}
+    errors: list[BaseException] = []
+
+    def one(fix: str, out: Path) -> None:
+        try:
+            git = open_checkout(SubprocessRunner(), str(repo.path), workdir)
+            commits = resolve_commits(git, fix, None, lambda _line: None)
+            _, checks = split_commit(commits, "origin", out, lambda _line: None)
+            results[f"{out.name}"] = checks.ok
+        except BaseException as exc:  # reported below with its thread
+            errors.append(exc)
+
+    for round_ in range(2):
+        threads = [
+            threading.Thread(target=one, args=(fix, tmp_path / f"out{round_}-{n}"))
+            for n, fix in enumerate(fixes)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+    assert errors == []
+    assert len(results) == 6 and all(results.values()), results

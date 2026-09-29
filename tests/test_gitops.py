@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from cargorewind.gitops import GitError, open_checkout, repo_slug
+from cargorewind.gitops import CheckoutLock, GitError, GitTree, open_checkout, repo_slug
+from cargorewind.patchsplit import parse_diff, split_diff
+from cargorewind.rewind import build_overlays
 from cargorewind.runner import CommandError, SubprocessRunner
 from tests.conftest import GitRepo
 
@@ -98,3 +101,37 @@ def test_apply_and_matches(make_repo: Callable[[str], GitRepo], tmp_path: Path) 
     git.checkout_clean(fix)
     with pytest.raises(GitError, match="does not apply"):
         git.apply(patch)
+
+
+def test_checkout_lock_is_exclusive_across_objects_and_reentrant(tmp_path: Path) -> None:
+    path = tmp_path / "work" / ".repo.lock"
+    first, second = CheckoutLock(path), CheckoutLock(path)
+    acquired = threading.Event()
+
+    def contender() -> None:
+        with second:
+            acquired.set()
+
+    with first, first:  # reentrant within one object
+        worker = threading.Thread(target=contender)
+        worker.start()
+        assert not acquired.wait(0.3)  # blocked while the first object holds it
+    assert acquired.wait(5)
+    worker.join(5)
+    with first:  # released by the contender, free again
+        assert path.exists()
+
+
+def test_rewind_overlays_refuse_a_checkout_that_does_not_match(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    origin = make_repo("origin")
+    base, fix = _two_commits(origin)
+    git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
+    split = split_diff(parse_diff(git.diff(base, fix)), GitTree(git, base), GitTree(git, fix))
+    (tmp_path / "test.patch").write_text(split.test_patch)
+    (tmp_path / "fix.patch").write_text(split.fix_patch)
+    assert build_overlays(git, base, fix, split, tmp_path)["after"].files["b.txt"] == b"new\n"
+    # Another run moved the tree under us: here, patches for a different target.
+    with pytest.raises(GitError, match="does not match the fix commit"):
+        build_overlays(git, base, base, split, tmp_path)
