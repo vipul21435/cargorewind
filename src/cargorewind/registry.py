@@ -9,6 +9,7 @@ not count as a pull. When the registry cannot answer, the offline table is the f
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ MANIFEST_TYPES = (
 INDEX_TYPES = MANIFEST_TYPES[:2]
 CACHE_SCHEMA = 1
 CACHE_FILE = "image-digests.json"
-_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")  # always fullmatch: "$" accepts a final newline
 
 
 class RegistryError(RuntimeError):
@@ -135,7 +136,7 @@ class RegistryClient:
         if resp.status != 200:
             raise RegistryError(f"{self.repository}:{tag}: HTTP {resp.status} from the registry")
         digest = resp.headers.get("docker-content-digest", "")
-        if _DIGEST.match(digest) is None:
+        if _DIGEST.fullmatch(digest) is None:
             raise RegistryError(f"{self.repository}:{tag}: no valid Docker-Content-Digest")
         media_type = resp.headers.get("content-type", "").split(";")[0].strip()
         return RegistryAnswer(digest, media_type, url)
@@ -173,11 +174,16 @@ class DigestCache:
 
     def get(self, image: str) -> dict[str, str] | None:
         entry = self._load().get(image)
-        if isinstance(entry, dict) and _DIGEST.match(str(entry.get("digest", ""))):
+        if isinstance(entry, dict) and _DIGEST.fullmatch(str(entry.get("digest", ""))):
             return entry
         return None
 
-    def put(self, image: str, answer: RegistryAnswer, resolved_at: datetime) -> None:
+    def put(self, image: str, answer: RegistryAnswer, resolved_at: datetime) -> bool:
+        """Store ``answer``; False (with ``note`` set) when the cache cannot be written.
+
+        The cache is only an optimization, so a read-only or misplaced cache directory
+        never costs the registry's answer.
+        """
         images = self._load()
         images[image] = {
             "digest": answer.digest,
@@ -186,10 +192,17 @@ class DigestCache:
             "resolved_at": resolved_at.isoformat(timespec="seconds"),
         }
         document = {"schema_version": CACHE_SCHEMA, "images": dict(sorted(images.items()))}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         partial = self.path.with_suffix(f".{os.getpid()}.tmp")
-        partial.write_text(json.dumps(document, indent=2) + "\n")
-        os.replace(partial, self.path)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_text(json.dumps(document, indent=2) + "\n")
+            os.replace(partial, self.path)
+        except OSError as exc:
+            self.note = f"cache {self.path} not written ({exc})"
+            with contextlib.suppress(OSError):
+                partial.unlink(missing_ok=True)
+            return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -245,14 +258,14 @@ class ImageResolver:
             return ImageChoice(
                 f"{name}@{pinned}", "offline-table", f"registry lookup failed ({exc}); fallback"
             )
-        if self.cache is not None:
-            self.cache.put(name, answer, self.now())
         reason = f"HEAD {answer.url} ({answer.media_type or 'no content type'})"
         if not answer.multi_arch:
             reason += "; single-platform manifest"
         if pinned is not None:
             same = pinned == answer.digest
             reason += "; matches the offline table" if same else "; differs from the offline table"
+        if self.cache is not None and not self.cache.put(name, answer, self.now()):
+            reason += f"; {self.cache.note}"
         return ImageChoice(f"{name}@{answer.digest}", "registry", reason)
 
 

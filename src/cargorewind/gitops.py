@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import posixpath
 import re
 import shutil
 import tarfile
@@ -124,8 +125,16 @@ class Git:
 
     def list_files(self, rev: str) -> list[str]:
         """Every file path in the tree of ``rev``."""
-        out = self._out("ls-tree", "-r", "-z", "--name-only", rev)
-        return [path for path in out.split("\0") if path]
+        return list(self.list_modes(rev))
+
+    def list_modes(self, rev: str) -> dict[str, str]:
+        """Every file path in the tree of ``rev`` with its mode (``120000`` is a symlink)."""
+        modes: dict[str, str] = {}
+        for entry in self._out("ls-tree", "-r", "-z", rev).split("\0"):
+            if entry:
+                meta, path = entry.split("\t", 1)
+                modes[path] = meta.split()[0]
+        return modes
 
     def archive(self, rev: str, dest: Path) -> None:
         """Extract the tree of ``rev`` (no .git) into ``dest``."""
@@ -174,21 +183,54 @@ class Git:
         return actual == expected
 
 
-class GitTree:
-    """One commit of a repository as a read-only ``SourceTree``."""
+LINK_MODE = "120000"
+MAX_LINK_HOPS = 8
 
-    def __init__(self, git: Git, rev: str) -> None:
+
+class GitTree:
+    """One commit of a repository as a read-only ``SourceTree``.
+
+    ``git show rev:path`` prints a symlink's target path, not the file it points to.
+    That is what a diff shows, so the split reads links as they are. Readers that stand
+    in for rustup or cargo (toolchain inference, lock planning) pass ``follow_links``:
+    a link is then resolved inside the tree, like the tools do in a checkout. A link
+    that leaves the tree, dangles or loops reads as a missing file.
+    """
+
+    def __init__(self, git: Git, rev: str, *, follow_links: bool = False) -> None:
         self.git = git
         self.rev = rev
-        self._paths: frozenset[str] | None = None
+        self.follow_links = follow_links
+        self._modes: dict[str, str] | None = None
+
+    def _entries(self) -> dict[str, str]:
+        if self._modes is None:
+            self._modes = self.git.list_modes(self.rev)
+        return self._modes
+
+    def resolve(self, path: str) -> str | None:
+        """The file ``path`` names after following symlinks, or None when there is none."""
+        modes = self._entries()
+        for _ in range(MAX_LINK_HOPS):
+            if modes.get(path) != LINK_MODE:
+                return path if path in modes else None
+            target = self.git.show_file(self.rev, path) or ""
+            joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+            if not target or target.startswith("/") or joined == ".." or joined.startswith("../"):
+                return None
+            path = joined
+        return None
 
     def read(self, path: str) -> str | None:
+        if self.follow_links:
+            resolved = self.resolve(path)
+            if resolved is None:
+                return None
+            path = resolved
         return self.git.show_file(self.rev, path)
 
     def paths(self) -> frozenset[str]:
-        if self._paths is None:
-            self._paths = frozenset(self.git.list_files(self.rev))
-        return self._paths
+        return frozenset(self._entries())
 
 
 def open_checkout(runner: Runner, source: str, workdir: Path) -> Git:

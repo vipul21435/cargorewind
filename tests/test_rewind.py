@@ -217,6 +217,36 @@ def test_rewind_image_from_the_registry_or_an_override(
     assert (task["image"], task["image_source"]["source"]) == (pinned, "override")
 
 
+def test_rewind_pins_the_toolchain_when_the_fix_adds_a_toolchain_file(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    # Regression: only a toolchain file at base set RUSTUP_TOOLCHAIN. A fix that adds
+    # rust-toolchain put the file into the after overlay, and rustup then tried to
+    # install "stable" under --network none, so a correct fix was NOT VERIFIED.
+    repo = make_repo("origin")
+    manifest = '[package]\nname = "demo"\nversion = "0.1.0"\n'
+    files = {"Cargo.toml": manifest, "src/lib.rs": LIB, "Cargo.lock": "version = 3\n"}
+    repo.commit("base", files, "2024-01-10T12:00:00+00:00")
+    fix = repo.commit(
+        "fix", {"src/lib.rs": FIXED, "rust-toolchain": "stable\n"}, "2024-01-11T12:00:00+00:00"
+    )
+    backend = ScriptedBackend(PASSING)
+    out = tmp_path / "out"
+    lines: list[str] = []
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work")
+    rewind(options, SubprocessRunner(), backend, lines.append)
+
+    assert sorted(backend.overlays["after"].files) == ["rust-toolchain", "src/lib.rs"]
+    assert "ENV RUSTUP_TOOLCHAIN=1.75.0" in backend.dockerfile
+    task = json.loads((out / "task.json").read_text())
+    assert task["toolchain"]["toolchain_file"] is None  # the base has none
+    pin = task["toolchain"]["decisions"][-1]
+    assert (pin["step"], pin["outcome"]) == ("pin", "1.75.0")
+    assert pin["reason"].startswith("the patches add or change rust-toolchain; every stage keeps")
+    report = json.loads((out / "toolchain.json").read_text())
+    assert report["toolchain"]["decisions"][-1] == pin
+
+
 def test_rewind_detects_patches_that_do_not_reproduce_the_fix(
     make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -115,8 +115,19 @@ def plan_lock(tree: SourceTree, toolchain: Toolchain, cutoff: datetime, vendor: 
     return LockPlan(strategy, cutoff, cargo, vendor, None, requirements, notes)
 
 
-def recipe_for(image: str, toolchain: Toolchain, base: str, plan: LockPlan) -> Recipe:
-    """The Dockerfile recipe of a resolved toolchain and lock plan."""
+def recipe_for(
+    image: str,
+    toolchain: Toolchain,
+    base: str,
+    plan: LockPlan,
+    patched_toolchain_files: tuple[str, ...] = (),
+) -> Recipe:
+    """The Dockerfile recipe of a resolved toolchain and lock plan.
+
+    ``RUSTUP_TOOLCHAIN`` is pinned when the base checkout has a toolchain file, and also
+    when a patch adds or changes one: the stages extract the patched file into the
+    checkout, and under ``--network none`` rustup could not install its channel.
+    """
     return Recipe(
         image,
         toolchain.version,
@@ -126,7 +137,7 @@ def recipe_for(image: str, toolchain: Toolchain, base: str, plan: LockPlan) -> R
         components=toolchain.components,
         targets=toolchain.targets,
         profile=toolchain.profile,
-        pin_toolchain=toolchain.toolchain_file is not None,
+        pin_toolchain=toolchain.toolchain_file is not None or bool(patched_toolchain_files),
         cutoff=plan.cutoff.isoformat() if plan.strategy is LockStrategy.BOUNDED else "",
         vendor=plan.vendor,
         cargo_config=plan.cargo_config,
@@ -259,5 +270,11 @@ def write_lock_report(
         (out / "Cargo.lock").write_text(plan.bound.lockfile)
 
 
-def dockerfile_for(image: str, toolchain: Toolchain, base: str, plan: LockPlan) -> str:
-    return render_dockerfile(recipe_for(image, toolchain, base, plan))
+def dockerfile_for(
+    image: str,
+    toolchain: Toolchain,
+    base: str,
+    plan: LockPlan,
+    patched_toolchain_files: tuple[str, ...] = (),
+) -> str:
+    return render_dockerfile(recipe_for(image, toolchain, base, plan, patched_toolchain_files))

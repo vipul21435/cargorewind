@@ -249,6 +249,25 @@ green, pushed, and the README describes it with real output.
   and `--index-dir`. `task.json` keeps schema 1 and gains `lock_report` and
   `vendored`; `lockfile` is now `committed`, `generated` or `date-bounded`.
 
+### Decisions made while fixing the slice 2 and 3 review findings (2026-09-30)
+
+- Every pattern that validates text bound for a Dockerfile line (toolchain channel,
+  exact version, component and target names, image digests) is applied with
+  `fullmatch`: `$` also accepts a final newline, which let a toolchain file start a new
+  Dockerfile instruction.
+- A host triple must start with a letter (every architecture does), so an unpadded
+  date such as `nightly-2020-1-01` is an unsupported channel instead of an undated
+  nightly with an ignored host. Impossible dates are `ToolchainError`s.
+- `GitTree` resolves symlinks inside the tree only for readers that stand in for
+  rustup and cargo (toolchain inference and lock planning); the split keeps reading
+  links as the diff shows them. A link that leaves the tree, dangles or loops reads as
+  a missing file.
+- `RUSTUP_TOOLCHAIN` is also set when a patch adds or changes a toolchain file, and the
+  toolchain decisions gain a `pin` step that says so. Pinning always would have
+  changed the strsim-rs Dockerfile for no behavioral gain.
+- A digest cache that cannot be written (read-only directory, a file in its place) is
+  reported in the image reason; the registry answer is kept.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.

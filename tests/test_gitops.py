@@ -135,3 +135,51 @@ def test_rewind_overlays_refuse_a_checkout_that_does_not_match(
     # Another run moved the tree under us: here, patches for a different target.
     with pytest.raises(GitError, match="does not match the fix commit"):
         build_overlays(git, base, base, split, tmp_path)
+
+
+def linked_repo(origin: GitRepo) -> tuple[str, str]:
+    """rust-toolchain is a symlink to rust-toolchain.toml, as some repositories keep it."""
+    origin.write(
+        {
+            "Cargo.toml": '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n',
+            "rust-toolchain.toml": '[toolchain]\nchannel = "1.70.0"\n',
+            "src/lib.rs": "pub fn f() {}\n",
+            "docs/readme.txt": "docs\n",
+        }
+    )
+    links = {
+        "rust-toolchain": "rust-toolchain.toml",
+        "outside": "../../etc/passwd",
+        "absolute": "/etc/passwd",
+        "dangling": "missing.toml",
+        "loop-a": "loop-b",
+        "loop-b": "loop-a",
+        "to-dir": "docs",
+        "docs/up": "../rust-toolchain",
+    }
+    for name, target in links.items():
+        (origin.path / name).symlink_to(target)
+    base = origin.commit("base", {}, "2024-01-10T12:00:00+00:00")
+    fix = origin.commit(
+        "fix", {"src/lib.rs": "pub fn f() -> u8 { 1 }\n"}, "2024-01-11T12:00:00+00:00"
+    )
+    return base, fix
+
+
+def test_git_tree_follows_symlinks_only_when_asked(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    origin = make_repo("origin")
+    base, _ = linked_repo(origin)
+    git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
+    assert git.list_modes(base)["rust-toolchain"] == "120000"
+    plain = GitTree(git, base)
+    assert plain.read("rust-toolchain") == "rust-toolchain.toml"  # what a diff shows
+    tree = GitTree(git, base, follow_links=True)
+    assert tree.read("rust-toolchain") == '[toolchain]\nchannel = "1.70.0"\n'
+    assert tree.read("docs/up") == tree.read("rust-toolchain")  # a link to a link
+    assert tree.resolve("docs/up") == "rust-toolchain.toml"
+    for name in ("outside", "absolute", "dangling", "loop-a", "to-dir", "missing"):
+        assert tree.read(name) is None, name
+    assert "rust-toolchain" in tree.paths() and "src/lib.rs" in tree.paths()
+    assert git.list_files(base) == sorted(git.list_files(base))

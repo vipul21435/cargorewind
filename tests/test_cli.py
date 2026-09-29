@@ -8,13 +8,14 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from cargorewind import __version__, cli
+from cargorewind import __version__, cli, registry
 from cargorewind.backend import ReplayBackend
 from cargorewind.deps import Pin
 from cargorewind.libtest import Outcome, compute_flip
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
 from tests.test_deps import INDEX, FakeCargo
-from tests.test_registry import FakeHttp
+from tests.test_gitops import linked_repo
+from tests.test_registry import FakeHttp, recorded
 from tests.test_rewind import FIXED, HOME_MANIFEST, LIB, CargoModelSession, ScriptedBackend
 
 runner = CliRunner()
@@ -142,6 +143,40 @@ def test_rewind_registry_options_reach_the_resolver(
     assert seen == [(True, tmp_path / "cache")]
 
 
+def test_toolchain_registry_lookup_with_an_unwritable_cache_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: the cache write raised an OSError that the command did not catch, so
+    # --registry died with a traceback and the registry's answer was lost.
+    digest = "sha256:" + "f" * 64
+    head = HttpResponse(
+        200,
+        {
+            "docker-content-digest": digest,
+            "content-type": "application/vnd.oci.image.index.v1+json",
+        },
+    )
+    manifest = ("HEAD", "v2/library/rust/manifests/1.39.0-slim")
+    http = FakeHttp({("GET", "token"): recorded("token.json"), manifest: head})
+    monkeypatch.setattr(registry, "UrllibClient", lambda *a, **k: http)
+    blocker = tmp_path / "cache-is-a-file"
+    blocker.write_text("")
+    args = [
+        "toolchain",
+        str(DEMO / "strsim-rs.bundle"),
+        "605c81c9b9",
+        "--workdir",
+        str(tmp_path / "work"),
+        "--registry",
+        "--cache-dir",
+        str(blocker),
+    ]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert f"image     rust:1.39.0-slim@{digest}" in result.stdout
+    assert "not written" in result.stdout
+
+
 TOOLCHAIN_FIXTURES = Path(__file__).parent / "fixtures" / "toolchain"
 
 
@@ -168,6 +203,17 @@ def test_toolchain_command_on_the_demo_bundle(tmp_path: Path) -> None:
     assert document["fix_commit"].startswith("605c81c9b9")
     assert document["toolchain"]["version"] == "1.39.0"
     assert document["image"]["source"] == "offline-table"
+
+
+def test_toolchain_command_reads_a_symlinked_legacy_file(make_repo: Any, tmp_path: Path) -> None:
+    # Regression: git show printed the link target, so the channel was "rust-toolchain.toml".
+    repo = make_repo("linked")
+    _, fix = linked_repo(repo)
+    args = ["toolchain", str(repo.path), fix, "--workdir", str(tmp_path / "work")]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert "toolchain 1.70.0 (rust-toolchain): rust-toolchain pins 1.70.0" in result.stdout
+    assert "have the same content (one may link to the other)" in result.stdout
 
 
 def _msrv_repo(make_repo: Any) -> tuple[Any, str]:

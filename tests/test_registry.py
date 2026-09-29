@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 from collections.abc import Iterator, Mapping
@@ -299,6 +300,49 @@ def test_registry_failure_falls_back_to_the_table() -> None:
     assert choice.reason.endswith("; fallback")
     with pytest.raises(ToolchainError, match="offline table has no digest"):
         resolver.resolve("1.40.0")
+
+
+def test_registry_answer_survives_a_cache_path_that_is_a_file(tmp_path: Path) -> None:
+    # Regression: DigestCache.put raised FileExistsError and the registry answer was lost.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("a regular file where the cache directory should be\n")
+    cache = DigestCache(blocker)
+    resolver = ImageResolver(registry=RegistryClient(docker_hub()), cache=cache, now=lambda: NOW)
+    choice = resolver.resolve("1.39.0")
+    assert (choice.source, choice.reference) == ("registry", f"rust:1.39.0-slim@{DIGEST_1390}")
+    assert f"; cache {blocker / CACHE_FILE} not written (" in choice.reason
+    assert cache.note.startswith("cache ")
+    assert blocker.read_text().startswith("a regular file")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_registry_answer_survives_a_read_only_cache_directory(tmp_path: Path) -> None:
+    read_only = tmp_path / "ro-cache"
+    read_only.mkdir()
+    read_only.chmod(0o555)
+    try:
+        cache = DigestCache(read_only)
+        answer = RegistryAnswer(DIGEST_1390, "application/vnd.oci.image.index.v1+json", "u")
+        assert cache.put("rust:1.39.0-slim", answer, NOW) is False
+        assert "Permission denied" in cache.note
+        assert list(read_only.iterdir()) == []  # no partial file left behind
+        resolver = ImageResolver(registry=RegistryClient(docker_hub()), cache=cache)
+        assert resolver.resolve("1.39.0").source == "registry"
+    finally:
+        read_only.chmod(0o755)
+
+
+def test_digest_with_a_trailing_newline_is_rejected(tmp_path: Path) -> None:
+    # Regression: "$" also matched before a final newline, so "sha256:...\n" passed.
+    sneaky = HttpResponse(200, {"docker-content-digest": DIGEST_1390 + "\n"})
+    with pytest.raises(RegistryError, match="no valid Docker-Content-Digest"):
+        RegistryClient(docker_hub(**{"1.40.0-slim": sneaky})).digest("1.40.0-slim")
+    document = {
+        "schema_version": 1,
+        "images": {"rust:1.39.0-slim": {"digest": DIGEST_1390 + "\n"}},
+    }
+    (tmp_path / CACHE_FILE).write_text(json.dumps(document))
+    assert DigestCache(tmp_path).get("rust:1.39.0-slim") is None
 
 
 def test_make_resolver(tmp_path: Path) -> None:

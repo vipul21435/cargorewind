@@ -208,14 +208,18 @@ PROFILES = ("minimal", "default", "complete")
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 TARGET_TABLES = ("bin", "test", "bench", "example")
 
-_EXACT = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?$")
+# Every pattern below is applied with fullmatch: "$" would also accept a trailing
+# newline, and these strings end up in Dockerfile lines.
+_EXACT = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+# A host triple starts with its architecture (x86_64, i686, aarch64, ...), never with a
+# digit, so a date without zero padding ("nightly-2020-1-01") is not read as a host.
 _CHANNEL = re.compile(
-    r"^(?P<name>stable|beta|nightly|\d+\.\d+(?:\.\d+)?)"
+    r"(?P<name>stable|beta|nightly|\d+\.\d+(?:\.\d+)?)"
     r"(?:-(?P<date>\d{4}-\d{2}-\d{2}))?"
-    r"(?:-(?P<host>[a-z0-9_]+(?:-[a-z0-9_.]+){1,3}))?$"
+    r"(?:-(?P<host>[a-z][a-z0-9_]*(?:-[a-z0-9_.]+){1,3}))?"
 )
 
-_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
 Version = tuple[int, int, int]
 
@@ -324,7 +328,7 @@ def stable_on(when: date) -> str:
 
 def normalize_version(channel: str) -> str | None:
     """``1.39`` -> newest ``1.39.x``; ``1.39.0`` -> itself; anything else -> None."""
-    match = _EXACT.match(channel)
+    match = _EXACT.fullmatch(channel)
     if match is None:
         return None
     if match.group(3) is not None:
@@ -339,7 +343,7 @@ def normalize_version(channel: str) -> str | None:
 
 def parse_version_requirement(text: str) -> Version | None:
     """``package.rust-version`` (``1.70`` or ``1.70.1``) as a version tuple."""
-    match = _EXACT.match(text.strip())
+    match = _EXACT.fullmatch(text.strip())
     if match is None:
         return None
     return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
@@ -373,7 +377,7 @@ def _string_list(value: object, what: str, name: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ToolchainError(f"{name}: [toolchain] {what} must be a list of strings")
     for item in value:
-        if _NAME.match(item) is None:
+        if _NAME.fullmatch(item) is None:
             raise ToolchainError(f"{name}: [toolchain] {what} has an invalid name {item!r}")
     return tuple(value)
 
@@ -425,14 +429,16 @@ def read_toolchain_file(
         return None
     name = "rust-toolchain" if "rust-toolchain" in present else "rust-toolchain.toml"
     if len(present) == 2:
-        decisions.append(
-            Decision(
-                "file",
-                name,
-                "both rust-toolchain and rust-toolchain.toml exist; rustup reads the legacy "
-                "rust-toolchain and warns, so this does too",
-            )
+        reason = (
+            "both rust-toolchain and rust-toolchain.toml exist; rustup reads the legacy "
+            "rust-toolchain and warns, so this does too"
         )
+        if present["rust-toolchain"] == present["rust-toolchain.toml"]:
+            reason = (
+                "rust-toolchain and rust-toolchain.toml have the same content (one may link "
+                "to the other); rustup reads rust-toolchain"
+            )
+        decisions.append(Decision("file", name, reason))
     spec = parse_toolchain_file(present[name], name)
     parts = [f"channel {spec.channel}" if spec.channel else "no channel"]
     if spec.components:
@@ -625,10 +631,14 @@ def _from_channel(
     if channel is None:
         decisions.append(Decision("channel", "none", f"{name} names no channel"))
         return None
-    match = _CHANNEL.match(channel)
+    match = _CHANNEL.fullmatch(channel)
     if match is None:
         raise ToolchainError(f"{name} asks for an unsupported channel {channel!r}")
     kind, dated, host = match.group("name"), match.group("date"), match.group("host")
+    try:
+        when = date.fromisoformat(dated) if dated else None
+    except ValueError as exc:
+        raise ToolchainError(f"{name} asks for a channel with an invalid date {channel!r}") from exc
     if host:
         decisions.append(
             Decision("channel", f"-{host} ignored", "the container's architecture decides")
@@ -642,7 +652,6 @@ def _from_channel(
         if exact != kind:
             reason += f" (newest {kind}.x is {exact})"
         return exact, reason, False
-    when = date.fromisoformat(dated) if dated else None
     if kind == "stable":
         if when is None:
             decisions.append(

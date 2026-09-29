@@ -347,6 +347,68 @@ def test_resolve_rejects_unknown_channels(channel: str) -> None:
         resolve_toolchain(_tree(channel), FIX_TIME)
 
 
+# Regressions from the slice 2 review
+
+
+def test_names_with_a_trailing_newline_cannot_inject_dockerfile_lines() -> None:
+    # "$" matched before a final newline, so "rustfmt\n" passed the name check and the
+    # following list items became a new Dockerfile instruction.
+    text = (
+        '[toolchain]\nchannel = "1.70.0"\n'
+        'components = ["rustfmt\\n", "RUN", "cargo", "install", "evil-crate"]\n'
+    )
+    with pytest.raises(ToolchainError, match="invalid name 'rustfmt\\\\n'"):
+        parse_toolchain_file(text, "rust-toolchain.toml")
+    tree = MemoryTree(
+        {"rust-toolchain.toml": text, "Cargo.toml": '[package]\nname = "x"\nedition = "2021"\n'}
+    )
+    with pytest.raises(ToolchainError, match="invalid name"):
+        resolve_toolchain(tree, datetime(2024, 1, 11, tzinfo=UTC))
+    toml = '[toolchain]\nchannel = "1.70.0\\nRUN evil"\n'
+    with pytest.raises(ToolchainError, match="unsupported channel"):
+        resolve_toolchain(_tree(toml), FIX_TIME)
+    assert parse_version_requirement("1.70\n") == (1, 70, 0)  # stripped, like cargo
+    assert normalize_version("1.70.0\n") is None
+
+
+@pytest.mark.parametrize(
+    "channel",
+    ["nightly-2020-02-30", "nightly-2020-13-01", "stable-2023-02-29", "beta-2021-00-10"],
+)
+def test_impossible_channel_dates_are_toolchain_errors(channel: str) -> None:
+    # A plain ValueError escaped before, which the CLI printed as a traceback.
+    with pytest.raises(ToolchainError, match="invalid date"):
+        resolve_toolchain(_tree(channel + "\n"), FIX_TIME)
+
+
+@pytest.mark.parametrize("channel", ["nightly-2020-1-01", "nightly-2020-01-1", "beta-2021-1-1"])
+def test_unpadded_channel_dates_are_not_read_as_host_triples(channel: str) -> None:
+    # "-2020-1-01" matched the host-triple group, so the channel silently became the
+    # nightly of the day before the commit.
+    with pytest.raises(ToolchainError, match="unsupported channel"):
+        resolve_toolchain(_tree(channel + "\n"), FIX_TIME)
+
+
+def test_host_triples_still_start_with_an_architecture() -> None:
+    chosen = resolve_toolchain(_tree("stable-i686-pc-windows-gnu\n"), FIX_TIME)
+    assert chosen.version == "1.39.0"
+    assert ("channel", "-i686-pc-windows-gnu ignored") in steps(chosen)
+
+
+def test_identical_toolchain_files_are_reported_as_one() -> None:
+    toml = '[toolchain]\nchannel = "1.70.0"\n'
+    tree = MemoryTree(
+        {
+            "rust-toolchain": toml,
+            "rust-toolchain.toml": toml,
+            "Cargo.toml": '[package]\nname = "x"\n',
+        }
+    )
+    chosen = resolve_toolchain(tree, datetime(2024, 1, 11, tzinfo=UTC))
+    assert (chosen.version, chosen.toolchain_file) == ("1.70.0", "rust-toolchain")
+    assert "have the same content" in chosen.decisions[0].reason
+
+
 # Manifest floors
 
 

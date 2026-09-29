@@ -320,7 +320,9 @@ def lock_command(
         commits = resolve_commits(git, sha, base, typer.echo)
         toolchain = infer_toolchain(commits)
         typer.echo(f"toolchain {toolchain.version} ({toolchain.source}): {toolchain.reason}")
-        plan = plan_lock(GitTree(git, commits.base), toolchain, commits.commit_time, False)
+        plan = plan_lock(
+            GitTree(git, commits.base, follow_links=True), toolchain, commits.commit_time, False
+        )
         for line in plan.lines():
             typer.echo(line)
         if plan.strategy is LockStrategy.BOUNDED:

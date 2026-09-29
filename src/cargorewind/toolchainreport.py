@@ -15,7 +15,8 @@ TOOLCHAIN_SCHEMA = 1
 
 def infer_toolchain(commits: Commits) -> Toolchain:
     """Toolchain for the base tree of ``commits``, dated by the fix commit."""
-    return resolve_toolchain(GitTree(commits.git, commits.base), commits.commit_time)
+    tree = GitTree(commits.git, commits.base, follow_links=True)
+    return resolve_toolchain(tree, commits.commit_time)
 
 
 def choose_image(

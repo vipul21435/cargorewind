@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ from cargorewind.patchsplit import SplitResult
 from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
 from cargorewind.splitreport import require, resolve_commits, split_commit, touched
-from cargorewind.toolchain import Toolchain
+from cargorewind.toolchain import TOOLCHAIN_FILES, Decision, Toolchain
 from cargorewind.toolchainreport import choose_image, infer_toolchain, toolchain_document
 
 TASK_SCHEMA = 1
@@ -123,6 +123,17 @@ class RewindReport:
         }
 
 
+def pin_patched_toolchain(toolchain: Toolchain, patched: tuple[str, ...]) -> Toolchain:
+    """Record that the patches touch a toolchain file, which the stages must not obey."""
+    reason = (
+        f"the patches add or change {', '.join(patched)}; every stage keeps "
+        f"{toolchain.version} through RUSTUP_TOOLCHAIN (rustup cannot install another "
+        "channel under --network none)"
+    )
+    decision = Decision("pin", toolchain.version, reason)
+    return replace(toolchain, decisions=(*toolchain.decisions, decision))
+
+
 def _snapshot(git: Git, paths: list[str]) -> Overlay:
     """Current working-tree state of ``paths`` as an overlay over the base checkout."""
     files: dict[str, bytes] = {}
@@ -174,7 +185,11 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     require(checks)
 
     toolchain = infer_toolchain(commits)
-    plan = plan_lock(GitTree(git, base), toolchain, commit_time, options.vendor)
+    patched = tuple(p for p in touched(split.test_files + split.fix_files) if p in TOOLCHAIN_FILES)
+    if patched:
+        toolchain = pin_patched_toolchain(toolchain, patched)
+    tree = GitTree(git, base, follow_links=True)
+    plan = plan_lock(tree, toolchain, commit_time, options.vendor)
     choice = choose_image(toolchain, options.image, options.resolver)
     image = choice.reference
     document = toolchain_document(options.source, commits, toolchain, choice)
@@ -184,7 +199,7 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     for line in plan.lines():
         log(line)
 
-    dockerfile = dockerfile_for(image, toolchain, base, plan)
+    dockerfile = dockerfile_for(image, toolchain, base, plan, patched)
     (out / "Dockerfile").write_text(dockerfile)
 
     overlays = build_overlays(git, base, fix, split, out)

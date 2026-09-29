@@ -131,8 +131,11 @@ and the logs of every run.
   the Dockerfile and lockfile. As root, before the user switch, it runs
   `rustup toolchain install` for a dated channel and `rustup component add` or
   `target add` for what the toolchain file lists. It sets `RUSTUP_TOOLCHAIN` whenever
-  the checkout has a toolchain file, so rustup cannot switch to the file's channel
-  at run time (for example `stable`, which would mean today's stable).
+  the base checkout has a toolchain file or a patch adds or changes one, so rustup
+  cannot switch to the file's channel at run time (for example `stable`, which would
+  mean today's stable and cannot be installed under `--network none`). Toolchain
+  files that are symlinks (a legacy `rust-toolchain` pointing at
+  `rust-toolchain.toml`) are read through the link, like rustup does.
 - **Three isolated runs.** base (no patches), before (test patch) and after (test and
   fix patches). Each run streams its changed files into
   `docker run --network none` as a tar on stdin, so it needs no bind mounts and no git
@@ -681,9 +684,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   below `rust-version` or the edition minimum cannot build (cargo refuses it), so a
   stable result is raised and the raise is recorded with the package that forced it.
   A dated nightly is kept, because raising it would change the channel. The checkout
-  still contains the toolchain file, so the Dockerfile sets `RUSTUP_TOOLCHAIN`.
-  Without it, rustup would follow the file at run time, and a `stable` file would
-  install today's stable.
+  still contains the toolchain file (or a patch brings one in), so the Dockerfile sets
+  `RUSTUP_TOOLCHAIN`. Without it, rustup would follow the file at run time, and a
+  `stable` file would install today's stable.
 - **Offline by default, registry on request.** The reviewed digest table makes
   `make demo` and the unit tests fully offline and deterministic. `--registry` fills
   the gaps with a HEAD request that costs no pull quota, and the cache makes the
@@ -765,6 +768,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   `nightly-2019-12-01` (1.41.0-nightly), but it can be one minor off in the days
   around a release. A dated nightly that was never published, or that lacks a
   requested component, fails at `docker build`.
+- The toolchain is inferred from the base commit. A fix that needs a newer toolchain
+  (for example one that bumps `rust-toolchain`) still runs on the base toolchain in
+  every stage, and the decision list says so.
 - On a stable image, a toolchain file's `profile` is ignored (the slim images carry the
   minimal profile); listed components are added. Custom `path` toolchains are
   rejected.
