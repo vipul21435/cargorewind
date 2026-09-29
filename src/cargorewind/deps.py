@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from cargorewind.backend import RunResult
+from cargorewind.backend import Session
 from cargorewind.crateindex import CrateIndex, CrateIndexError, IndexVersion, candidates
 from cargorewind.layout import SourceTree
 from cargorewind.lockfile import LockedPackage, Lockfile, parse_lockfile
@@ -339,12 +339,6 @@ def bound_lockfile(
 
 
 # cargo in a container session
-
-
-class Session(Protocol):
-    """A running container that executes shell scripts in the base checkout."""
-
-    def run(self, step: str, script: str) -> RunResult: ...
 
 
 def cargo_script(commands: list[tuple[str, str]]) -> str:

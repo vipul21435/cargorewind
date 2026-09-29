@@ -332,6 +332,9 @@ class FakeSession:
         self.steps.append((step, script))
         return RunResult(0, self.outputs.pop(0))
 
+    def close(self) -> None:
+        return None
+
 
 LOCK_TEXT = 'version = 3\n\n[[package]]\nname = "demo"\nversion = "0.1.0"\n'
 

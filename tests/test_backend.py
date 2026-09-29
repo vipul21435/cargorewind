@@ -52,6 +52,8 @@ def test_container_script() -> None:
     assert container_script(Overlay()) == (
         "cd /home/rewind/repo && exec cargo test --no-fail-fast 2>&1"
     )
+    offline = container_script(Overlay(), ("cargo", "test", "--offline"))
+    assert offline.endswith("exec cargo test --offline 2>&1")
     script = container_script(Overlay({"a.rs": b""}, deleted=("old file.rs",)))
     assert script == (
         "cd /home/rewind/repo && tar -xmf - && rm -f -- 'old file.rs' && "
@@ -111,12 +113,31 @@ def test_docker_run_without_overlay_sends_no_stdin_and_kills_on_timeout() -> Non
     assert runner.calls[1]["argv"][:3] == ("docker", "rm", "-f")  # type: ignore[index]
 
 
-class _StubBackend:
-    def build(self, context: Path, tag: str) -> BuildResult:
-        return BuildResult("sha256:img", "log")
+class _StubSession:
+    def __init__(self) -> None:
+        self.closed = False
 
-    def run_tests(self, tag: str, stage: str, overlay: Overlay) -> RunResult:
+    def run(self, step: str, script: str) -> RunResult:
+        return RunResult(0, f"{step}: {script.strip()}\n")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StubBackend:
+    def __init__(self) -> None:
+        self.session = _StubSession()
+
+    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
+        return BuildResult(f"sha256:img-{target or 'final'}", "log")
+
+    def run_tests(
+        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = ()
+    ) -> RunResult:
         return RunResult(0, f"test {stage} ... ok\n")
+
+    def open_session(self, tag: str) -> _StubSession:
+        return self.session
 
 
 def test_record_then_replay_round_trip(tmp_path: Path) -> None:
@@ -129,12 +150,70 @@ def test_record_then_replay_round_trip(tmp_path: Path) -> None:
 
     data = json.loads(transcript.read_text())
     assert data["schema"] == 1
-    assert data["build"]["image_id"] == "sha256:img"
+    assert data["build"]["image_id"] == "sha256:img-final"
     assert data["runs"]["before"]["overlay_sha256"] == overlay.digest()
+    assert "steps" not in data  # no session, no steps: old transcripts stay unchanged
 
     replay = ReplayBackend(transcript)
-    assert replay.build(context, "other-tag").image_id == "sha256:img"
+    assert replay.build(context, "other-tag").image_id == "sha256:img-final"
     assert replay.run_tests("t", "before", overlay) == RunResult(0, "test before ... ok\n")
+
+
+def test_record_then_replay_stage_builds_and_session_steps(tmp_path: Path) -> None:
+    context = _context(tmp_path / "ctx")
+    transcript = tmp_path / "transcript.json"
+    stub = _StubBackend()
+    recorder = RecordingBackend(stub, transcript)
+    assert recorder.build(context, "stage", "toolchain").image_id == "sha256:img-toolchain"
+    session = recorder.open_session("stage")
+    assert session.run("generate-lockfile", "cargo generate-lockfile\n") == RunResult(
+        0, "generate-lockfile: cargo generate-lockfile\n"
+    )
+    session.close()
+    assert stub.session.closed
+    data = json.loads(transcript.read_text())
+    assert data["build:toolchain"]["image_id"] == "sha256:img-toolchain"
+    assert set(data["steps"]) == {"generate-lockfile"}
+
+    replay = ReplayBackend(transcript)
+    assert replay.build(context, "x", "toolchain").image_id == "sha256:img-toolchain"
+    replayed = replay.open_session("x")
+    assert replayed.run("generate-lockfile", "cargo generate-lockfile\n").exit_code == 0
+    replayed.close()
+    with pytest.raises(ReplayError, match="step 'generate-lockfile' differs"):
+        replayed.run("generate-lockfile", "cargo generate-lockfile -v\n")
+    with pytest.raises(ReplayError, match="no recorded session step 'pin-round-1'"):
+        replayed.run("pin-round-1", "")
+    with pytest.raises(ReplayError, match=r"no recorded build$"):
+        replay.build(context, "x")
+
+
+def test_docker_build_with_a_target_and_a_session() -> None:
+    runner = FakeRunner(
+        [
+            (("docker", "image", "inspect"), CommandResult((), 0, "sha256:abc\n", "")),
+            (("docker", "exec"), CommandResult((), 0, "out\n", "err\n")),
+        ]
+    )
+    backend = DockerBackend(runner, timeout=9)
+    context = Path("/ctx")
+    assert backend.build(context, "tag", "toolchain").image_id == "sha256:abc"
+    build = runner.calls[0]["argv"]
+    assert isinstance(build, tuple)
+    assert build[-4:] == ("tag", "--target", "toolchain", ".")
+    session = backend.open_session("tag")
+    started = runner.calls[2]["argv"]
+    assert isinstance(started, tuple)
+    assert started[:4] == ("docker", "run", "-d", "--rm")
+    assert started[-3:] == ("tag", "sleep", "infinity")
+    name = started[started.index("--name") + 1]
+    assert session.run("s", "echo hi") == RunResult(0, "out\nerr\n")
+    assert runner.calls[3]["argv"] == ("docker", "exec", name, "sh", "-c", "echo hi")
+    assert runner.calls[3]["timeout"] == 9
+    session.close()
+    assert runner.calls[4]["argv"] == ("docker", "rm", "-f", name)
+    other = backend.open_session("tag")
+    assert isinstance(other, type(session)) and other.name != name  # type: ignore[attr-defined]
 
 
 def test_replay_rejects_drifted_inputs(tmp_path: Path) -> None:

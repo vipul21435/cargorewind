@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,9 +10,20 @@ from typing import Any
 
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
-from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, GitError, open_checkout, repo_slug
+from cargorewind.crateindex import CrateIndex
+from cargorewind.dockerfile import LockStrategy, stage_test_command
+from cargorewind.gitops import Git, GitError, GitTree, open_checkout
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
+from cargorewind.lockstage import (
+    LockPlan,
+    build_context,
+    default_index,
+    dockerfile_for,
+    image_tag,
+    plan_lock,
+    run_pin_loop,
+    write_lock_report,
+)
 from cargorewind.patchsplit import SplitResult
 from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
@@ -37,6 +46,8 @@ class RewindOptions:
     base: str | None = None
     image: str | None = None
     resolver: ImageResolver | None = None  # default: the offline digest table
+    vendor: bool = False
+    index: CrateIndex | None = None  # default: the live sparse index behind the cache
 
 
 @dataclass
@@ -55,7 +66,7 @@ class RewindReport:
     toolchain: Toolchain
     image: ImageChoice
     image_id: str
-    has_lockfile: bool
+    lock: LockPlan
     split: SplitResult
     runs: dict[str, StageRun] = field(default_factory=dict)
     flip: Flip | None = None
@@ -73,8 +84,10 @@ class RewindReport:
             "toolchain": self.toolchain.as_dict(),
             "image": self.image.reference,
             "image_source": {"source": self.image.source, "reason": self.image.reason},
-            "lockfile": "committed" if self.has_lockfile else "generated",
-            "test_command": " ".join(TEST_COMMAND),
+            "lockfile": self.lock.strategy.value,
+            "lock_report": "lock.json",
+            "vendored": self.lock.vendor,
+            "test_command": " ".join(stage_test_command(self.lock.vendor)),
             "split": {
                 "test_files": sorted(d.path for d in self.split.test_files),
                 "fix_files": sorted(d.path for d in self.split.fix_files),
@@ -108,21 +121,6 @@ class RewindReport:
             "still_failing": self.flip.still_failing,
             "verified": self.flip.verified,
         }
-
-
-def recipe_for(image: str, toolchain: Toolchain, base: str, has_lockfile: bool) -> Recipe:
-    """The Dockerfile recipe of a resolved toolchain."""
-    return Recipe(
-        image,
-        toolchain.version,
-        base,
-        has_lockfile,
-        install_toolchain=toolchain.install,
-        components=toolchain.components,
-        targets=toolchain.targets,
-        profile=toolchain.profile,
-        pin_toolchain=toolchain.toolchain_file is not None,
-    )
 
 
 def _snapshot(git: Git, paths: list[str]) -> Overlay:
@@ -176,30 +174,31 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     require(checks)
 
     toolchain = infer_toolchain(commits)
+    plan = plan_lock(GitTree(git, base), toolchain, commit_time, options.vendor)
     choice = choose_image(toolchain, options.image, options.resolver)
     image = choice.reference
     document = toolchain_document(options.source, commits, toolchain, choice)
     (out / "toolchain.json").write_text(json.dumps(document, indent=2) + "\n")
-    has_lockfile = git.show_file(base, "Cargo.lock") is not None
     log(f"toolchain {toolchain.version}: {toolchain.reason}")
     log(f"image     {image}")
-    log(f"lockfile  {'committed: cargo fetch --locked' if has_lockfile else 'none: generated'}")
+    for line in plan.lines():
+        log(line)
 
-    dockerfile = render_dockerfile(recipe_for(image, toolchain, base, has_lockfile))
+    dockerfile = dockerfile_for(image, toolchain, base, plan)
     (out / "Dockerfile").write_text(dockerfile)
 
     overlays = build_overlays(git, base, fix, split, out)
 
     # A build context of its own: parallel runs of one repository share the work directory.
-    context = Path(tempfile.mkdtemp(prefix="context-", dir=workdir))
-    try:
-        git.archive(base, context / "repo")
-        (context / "Dockerfile").write_text(dockerfile)
-        tag = f"cargorewind/{repo_slug(options.source)}:{base[:12]}"
+    with build_context(git, base, workdir, dockerfile) as context:
+        lockfile = ""
+        if plan.strategy is LockStrategy.BOUNDED:
+            index = options.index or default_index(commit_time)
+            lockfile = run_pin_loop(plan, backend, context, index, log).lockfile
+        write_lock_report(out, options.source, commits, toolchain, plan)
+        tag = image_tag(options.source, base, dockerfile, lockfile)
         log(f"build     {tag}")
         built = backend.build(context, tag)
-    finally:
-        shutil.rmtree(context, ignore_errors=True)
     logs = out / "logs"
     logs.mkdir(exist_ok=True)
     (logs / "build.log").write_text(built.log)
@@ -212,11 +211,12 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         toolchain,
         choice,
         built.image_id,
-        has_lockfile,
+        plan,
         split,
     )
+    command = stage_test_command(plan.vendor)
     for stage in STAGES:
-        result = backend.run_tests(tag, stage, overlays[stage])
+        result = backend.run_tests(tag, stage, overlays[stage], command)
         (logs / f"{stage}.log").write_text(result.output)
         outcomes = parse_libtest(result.output)
         report.runs[stage] = StageRun(stage, result, outcomes)

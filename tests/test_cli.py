@@ -10,9 +10,12 @@ from typer.testing import CliRunner
 
 from cargorewind import __version__, cli
 from cargorewind.backend import ReplayBackend
+from cargorewind.deps import Pin
 from cargorewind.libtest import Outcome, compute_flip
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
+from tests.test_deps import INDEX, FakeCargo
 from tests.test_registry import FakeHttp
+from tests.test_rewind import FIXED, HOME_MANIFEST, LIB, CargoModelSession, ScriptedBackend
 
 runner = CliRunner()
 
@@ -218,3 +221,107 @@ def test_toolchain_command_reports_unknown_commits(make_repo: Any, tmp_path: Pat
     result = runner.invoke(cli.app, args)
     assert result.exit_code == 1
     assert "unknown commit" in result.output
+
+
+# The lock command
+
+
+def _home_repo(make_repo: Any, lock: str | None = None) -> tuple[str, str]:
+    repo = make_repo("origin")
+    files: dict[str, str | None] = {
+        "Cargo.toml": HOME_MANIFEST,
+        "src/lib.rs": LIB,
+        "rust-toolchain": "1.75\n",
+    }
+    if lock is not None:
+        files["Cargo.lock"] = lock
+    repo.commit("base", files, "2024-02-20T12:00:00+00:00")
+    fix = repo.commit("fix", {"src/lib.rs": FIXED}, "2024-03-01T00:00:00+00:00")
+    return str(repo.path), fix
+
+
+def _lock_args(tmp_path: Path, source: str, fix: str, *extra: str) -> list[str]:
+    return [
+        "lock",
+        source,
+        fix,
+        "--out",
+        str(tmp_path / "lock"),
+        "--workdir",
+        str(tmp_path / "work"),
+        *extra,
+    ]
+
+
+def test_lock_command_checks_a_committed_lockfile_without_docker(
+    make_repo: Any, tmp_path: Path
+) -> None:
+    source, fix = _home_repo(make_repo, lock="version = 4\n")
+    result = runner.invoke(cli.app, _lock_args(tmp_path, source, fix))
+    assert result.exit_code == 0, result.output
+    assert (
+        "lockfile  committed Cargo.lock, format v4 (cargo 1.78.0+ reads it); cargo fetch --locked"
+    ) in result.stdout
+    assert "toolchain 1.78.0 (Cargo.lock): raised from 1.75.0" in result.stdout
+    document = json.loads((tmp_path / "lock" / "lock.json").read_text())
+    assert (document["strategy"], document["format_version"]) == ("committed", 4)
+    assert document["readable_from"] == "1.78.0"
+    assert not (tmp_path / "lock" / "Cargo.lock").exists()
+
+
+def test_lock_command_on_a_crate_without_dependencies(tmp_path: Path) -> None:
+    args = _lock_args(tmp_path, str(DEMO / "strsim-rs.bundle"), "605c81c9b9")
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert "no crates.io dependencies: cargo generates it in the image" in result.stdout
+    assert "wrote     " in result.stdout and "(lock.json)" in result.stdout
+
+
+def test_lock_command_records_and_replays_the_pin_loop(
+    make_repo: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, fix = _home_repo(make_repo)
+    session = CargoModelSession(FakeCargo(INDEX, {"demo": [("home", "0.5.4")]}))
+    backend = ScriptedBackend({}, session)
+    monkeypatch.setattr(cli, "DockerBackend", lambda runner, timeout: backend)
+    transcript = tmp_path / "lock-transcript.json"
+    index = ["--index-dir", str(INDEX.root)]
+    recorded = runner.invoke(
+        cli.app, _lock_args(tmp_path, source, fix, *index, "--record", str(transcript))
+    )
+    assert recorded.exit_code == 0, recorded.output
+    assert "pin       round 1: 1 package(s)" in recorded.stdout
+    assert "          home 0.5.12 -> 0.5.9 (ok)" in recorded.stdout
+    assert "lock      9 pin(s) in 3 round(s); every crates.io package is bounded" in recorded.stdout
+    assert "(lock.json, Cargo.lock)" in recorded.stdout
+    first = (tmp_path / "lock" / "Cargo.lock").read_text()
+
+    monkeypatch.setattr(cli, "DockerBackend", lambda runner, timeout: None)
+    (tmp_path / "lock" / "Cargo.lock").unlink()
+    replayed = runner.invoke(
+        cli.app, _lock_args(tmp_path, source, fix, *index, "--replay", str(transcript))
+    )
+    assert replayed.exit_code == 0, replayed.output
+    assert "mode      replay of" in replayed.stdout
+    assert (tmp_path / "lock" / "Cargo.lock").read_text() == first
+
+
+def test_lock_command_exit_codes(
+    make_repo: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, fix = _home_repo(make_repo)
+
+    class Refusing(FakeCargo):
+        def pin(self, pins: list[Pin]) -> tuple[str, dict[str, str]]:
+            return self.render(), {p.spec: "error: refused" for p in pins}
+
+    session = CargoModelSession(Refusing(INDEX, {"demo": [("home", "0.5.4")]}))
+    monkeypatch.setattr(cli, "DockerBackend", lambda runner, timeout: ScriptedBackend({}, session))
+    stuck = runner.invoke(
+        cli.app, _lock_args(tmp_path, source, fix, "--index-dir", str(INDEX.root))
+    )
+    assert stuck.exit_code == 2, stuck.output
+    assert "package(s) could not be bounded" in stuck.stdout
+    broken, fix2 = _home_repo(lambda name: make_repo(name + "-broken"), "x = [")
+    bad = runner.invoke(cli.app, _lock_args(tmp_path / "b", broken, fix2))
+    assert bad.exit_code == 1 and "Cargo.lock" in bad.output
