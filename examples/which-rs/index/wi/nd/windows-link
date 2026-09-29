@@ -1,0 +1,8 @@
+{"name":"windows-link","vers":"0.0.0","deps":[],"yanked":false,"pubtime":"2024-07-17T14:18:37Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.1.0","deps":[],"yanked":false,"pubtime":"2025-02-21T16:29:08Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.1.1","deps":[],"yanked":false,"pubtime":"2025-03-18T13:38:06Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.1.2","deps":[],"yanked":true,"pubtime":"2025-06-11T19:33:33Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.1.3","deps":[],"yanked":false,"pubtime":"2025-06-12T18:57:32Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.2.0","deps":[],"yanked":false,"pubtime":"2025-09-04T20:18:34Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.2.1","deps":[],"yanked":false,"pubtime":"2025-10-06T17:35:08Z","rust_version":"1.71"}
+{"name":"windows-link","vers":"0.100.0","deps":[],"yanked":false,"pubtime":"2026-09-03T16:39:03Z","rust_version":"1.85"}

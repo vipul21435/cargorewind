@@ -47,7 +47,9 @@ jobs:
         run: make demo
       - name: Offline toolchain inference demo
         run: make toolchain-demo
+      - name: Offline date-bounded lockfile demo (replayed pin loop)
+        run: make lock-demo
       - name: Build the CLI image and run the demo in it
         run: make docker-demo IMAGE=cargorewind:ci
-      - name: Live end-to-end rewind through Docker (rust:1.39.0-slim)
+      - name: Live end-to-end runs through Docker (strsim-rs flip, which-rs pin loop)
         run: make e2e

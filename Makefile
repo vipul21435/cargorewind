@@ -1,7 +1,8 @@
-.PHONY: install lint format typecheck test cov demo split-demo toolchain-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
+.PHONY: install lint format typecheck test cov demo split-demo toolchain-demo lock-demo lock-demo-live record-lock-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
 
 IMAGE ?= cargorewind:dev
 DEMO_ARGS = examples/strsim/strsim-rs.bundle --fix 605c81c9b9
+LOCK_ARGS = examples/which-rs/which-rs.bundle e776ff0 --index-dir examples/which-rs/index
 
 install:
 	uv sync --frozen
@@ -34,6 +35,20 @@ split-demo:
 # Offline: print every toolchain decision for the strsim-rs fix and write toolchain.json.
 toolchain-demo:
 	uv run cargorewind toolchain $(word 1,$(DEMO_ARGS)) 605c81c9b9 --json out/toolchain/toolchain.json
+
+# Offline: replays the recorded pin loop that bounds which-rs e776ff0 (no Cargo.lock) by date.
+lock-demo:
+	uv run cargorewind lock $(LOCK_ARGS) --out out/lock-demo --replay examples/which-rs/lock-transcript.json
+
+# Live: the same pin loop with real cargo in a rust:1.73.0-slim container.
+lock-demo-live:
+	uv run cargorewind lock $(LOCK_ARGS) --out out/lock-demo-live
+	$(MAKE) docker-prune
+
+# Re-record the committed lock transcript from a live run.
+record-lock-demo:
+	uv run cargorewind lock $(LOCK_ARGS) --out out/lock-demo-live --record examples/which-rs/lock-transcript.json
+	$(MAKE) docker-prune
 
 # Live: builds the rust:1.39.0-slim environment and runs the three test stages in Docker.
 demo-live:

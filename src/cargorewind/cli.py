@@ -149,9 +149,10 @@ def _print_summary(report: RewindReport, out: Path) -> None:
         typer.echo(f"still failing {len(flip.still_failing)}: {', '.join(flip.still_failing)}")
     verdict = "VERIFIED" if flip.verified else "NOT VERIFIED"
     typer.echo(f"verdict       {verdict} fail-to-pass flip")
-    typer.echo(
-        f"bundle        {out}/ (task.json, split.json, Dockerfile, test.patch, fix.patch, logs/)"
-    )
+    files = "task.json, split.json, toolchain.json, lock.json, Dockerfile, patches, logs/"
+    if report.lock.bound is not None:
+        files = files.replace("lock.json", "lock.json, Cargo.lock")
+    typer.echo(f"bundle        {out}/ ({files})")
 
 
 @app.command("split")

@@ -104,7 +104,8 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     report = SimpleNamespace(
-        flip=compute_flip({"a": Outcome.PASSED}, {"a": Outcome.PASSED}, {"a": Outcome.FAILED})
+        flip=compute_flip({"a": Outcome.PASSED}, {"a": Outcome.PASSED}, {"a": Outcome.FAILED}),
+        lock=SimpleNamespace(bound=object()),
     )
     monkeypatch.setattr(cli, "rewind", lambda *args: report)
     missing = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", "x.json"))
@@ -114,6 +115,7 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     assert result.exit_code == 2
     assert "regressions   1: a" in result.stdout
     assert "NOT VERIFIED" in result.stdout
+    assert "lock.json, Cargo.lock, Dockerfile" in result.stdout
 
 
 def test_rewind_registry_options_reach_the_resolver(
@@ -325,3 +327,29 @@ def test_lock_command_exit_codes(
     broken, fix2 = _home_repo(lambda name: make_repo(name + "-broken"), "x = [")
     bad = runner.invoke(cli.app, _lock_args(tmp_path / "b", broken, fix2))
     assert bad.exit_code == 1 and "Cargo.lock" in bad.output
+
+
+WHICH = Path(__file__).resolve().parents[1] / "examples" / "which-rs"
+
+
+def test_lock_demo_replays_the_recorded_pin_loop_offline(tmp_path: Path) -> None:
+    """The committed which-rs demo: a live pin loop with real cargo, replayed."""
+    args = _lock_args(
+        tmp_path,
+        str(WHICH / "which-rs.bundle"),
+        "e776ff0",
+        "--index-dir",
+        str(WHICH / "index"),
+        "--replay",
+        str(WHICH / "lock-transcript.json"),
+    )
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert "lockfile  none: 7 crates.io requirement(s)" in result.stdout
+    assert "lock      generated: 41 crates.io package(s), 32 published at or after" in result.stdout
+    assert "          home 0.5.12 -> 0.5.5 (ok)" in result.stdout
+    assert "lock      16 pin(s) in 4 round(s); every crates.io package is bounded" in result.stdout
+    document = json.loads((tmp_path / "lock" / "lock.json").read_text())
+    assert document["bounded"] is True and len(document["rounds"]) == 4
+    assert document["cutoff"] == "2023-10-17T22:45:33+00:00"
+    assert 'name = "home"\nversion = "0.5.5"' in (tmp_path / "lock" / "Cargo.lock").read_text()
