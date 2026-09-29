@@ -113,6 +113,56 @@ green, pushed, and the README describes it with real output.
   functions outside `cfg(test)` as test code, splitting `[dev-dependencies]` manifest
   hunks into `test.patch`, and macro-generated modules.
 
+### Decisions made while building slice 2 (2026-09-30)
+
+- Precedence when both toolchain files exist stays rustup's: the legacy
+  `rust-toolchain` wins (rustup reads it and warns). The slice text lists
+  `rust-toolchain.toml` first; that order names the sources, while the tie-break follows
+  what developers actually ran. `rust-toolchain.toml` must be TOML; the legacy file is
+  a bare channel only when it has one non-empty line without `=` or `[`.
+- Channels: exact versions (`1.56` becomes the newest `1.56.x`), `stable-YYYY-MM-DD`
+  (release of that day), dated `nightly-`/`beta-YYYY-MM-DD`, undated `nightly`/`beta`
+  (the channel of the day before the commit, the newest one surely published before
+  it) and an ignored host-triple suffix. Custom `path` toolchains are rejected.
+  Component and target names are validated against `[A-Za-z0-9_.-]`, because they
+  end up in a Dockerfile `RUN` line.
+- Floors come from the root package and the members of the root workspace (members
+  globs minus `exclude`); unlisted packages elsewhere in the tree are ignored. Floors:
+  `rust-version` (own or inherited), edition minimums (package and per-target), and
+  1.64 for any `key.workspace = true` in `[package]` or dependency tables. A stable
+  result below the highest floor is raised to the lowest release that meets it, at
+  its newest patch published before the commit (else its first patch). A pinned file
+  is raised too, because cargo refuses to build below `rust-version`; the decision
+  names the package that forced it.
+- Dated channels are never raised (that would change the channel); a warning is
+  recorded when the channel's estimated version (stable minor of that day + 2 for
+  nightly, + 1 for beta) is below a floor. They are installed with
+  `rustup toolchain install <channel> --profile <p>` on a fixed host image,
+  `CHANNEL_HOST_VERSION = 1.98.1` (newest in the digest table, newest rustup), so
+  the recipe does not depend on network lookups. Verified once in Docker with
+  `nightly-2020-01-01` + rustfmt: rustc 1.42.0-nightly, running as the non-root user
+  under `--network none`.
+- `ENV RUSTUP_TOOLCHAIN=<chosen>` is set whenever the checkout has a toolchain file
+  (or a channel is installed). Otherwise rustup in the container follows the file,
+  which for `stable` means today's stable and for a raised pin means the too-old
+  version. It is not set when there is no file, so the strsim-rs Dockerfile and the
+  recorded replay transcript stay byte-identical.
+- On stable images the file's components and targets are added with
+  `rustup component add` / `rustup target add`; its `profile` is recorded but not
+  applied (the slim images use the minimal profile).
+- Registry lookup is opt-in (`--registry`): cache first, then Docker Hub (anonymous
+  token + HEAD on the manifest, `Docker-Content-Digest`), then the offline table as
+  fallback when the registry fails. The cache is one JSON file written atomically
+  (`$CARGOREWIND_CACHE_DIR`, `$XDG_CACHE_HOME/cargorewind` or `~/.cache/cargorewind`);
+  entries never expire. Recorded registry responses in `tests/fixtures/registry/` drop
+  the rate-limit and client-address headers and replace the token.
+- `toolchain.json` (schema 1) is written by both `cargorewind toolchain --json` and
+  `rewind`; `task.json` gains `toolchain.decisions`, `image_source` and
+  `toolchain_report` and keeps schema 1 (additive fields).
+- `cargorewind toolchain <repo> <sha>` takes the fix commit like the other commands:
+  files are read at its base (first parent unless `--base`), the date rule uses its
+  committer date.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
@@ -148,7 +198,7 @@ green, pushed, and the README describes it with real output.
 ## Slices
 
 - [x] 1. Rust-aware patch split and `#[cfg(test)]` report
-- [ ] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
+- [x] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
 - [ ] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
 - [ ] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
 - [ ] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
