@@ -247,7 +247,7 @@ class ImageResolver:
             )
         if self.cache is not None:
             self.cache.put(name, answer, self.now())
-        reason = f"registry HEAD {answer.url} ({answer.media_type or 'no content type'})"
+        reason = f"HEAD {answer.url} ({answer.media_type or 'no content type'})"
         if not answer.multi_arch:
             reason += "; single-platform manifest"
         if pinned is not None:

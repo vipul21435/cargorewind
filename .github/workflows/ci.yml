@@ -45,6 +45,8 @@ jobs:
         run: make install
       - name: Offline demo (replayed Docker runs)
         run: make demo
+      - name: Offline toolchain inference demo
+        run: make toolchain-demo
       - name: Build the CLI image and run the demo in it
         run: make docker-demo IMAGE=cargorewind:ci
       - name: Live end-to-end rewind through Docker (rust:1.39.0-slim)

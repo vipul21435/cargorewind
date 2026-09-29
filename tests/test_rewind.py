@@ -98,6 +98,10 @@ def test_rewind_synthetic_crate_end_to_end(
     assert task["lockfile"] == "committed"
     assert task["image"] == f"rust:1.70.0-slim@{IMAGE_DIGESTS['1.70.0']}"
     assert task["image_source"] == {"source": "offline-table", "reason": "offline digest table"}
+    assert task["toolchain_report"] == "toolchain.json"
+    report = json.loads((out / "toolchain.json").read_text())
+    assert report["toolchain"]["version"] == "1.70.0"
+    assert report["image"]["reference"] == task["image"]
     assert task["split"]["shared_files"] == ["src/lib.rs"]
     hunk = task["split"]["cfg_test_hunks"][0]
     assert (hunk["test_lines"], hunk["fix_lines"]) == (5, 2)

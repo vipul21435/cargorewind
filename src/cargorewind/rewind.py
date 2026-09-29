@@ -12,13 +12,14 @@ from typing import Any
 from cargorewind import __version__
 from cargorewind.backend import Backend, Overlay, RunResult
 from cargorewind.dockerfile import TEST_COMMAND, Recipe, render_dockerfile
-from cargorewind.gitops import Git, GitTree, open_checkout, repo_slug
+from cargorewind.gitops import Git, open_checkout, repo_slug
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.patchsplit import SplitResult
 from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
 from cargorewind.splitreport import require, resolve_commits, split_commit, touched
-from cargorewind.toolchain import Toolchain, resolve_toolchain
+from cargorewind.toolchain import Toolchain
+from cargorewind.toolchainreport import choose_image, infer_toolchain, toolchain_document
 
 TASK_SCHEMA = 1
 STAGES = ("base", "before", "after")
@@ -91,6 +92,7 @@ class RewindReport:
                 "notes": self.split.notes,
                 "report": "split.json",
             },
+            "toolchain_report": "toolchain.json",
             "runs": {
                 name: {
                     "exit_code": run.result.exit_code,
@@ -167,12 +169,11 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     split, checks = split_commit(commits, options.source, out, log)
     require(checks)
 
-    toolchain = resolve_toolchain(GitTree(git, base), commit_time)
-    if options.image is not None:
-        choice = ImageChoice(options.image, "override", "--image")
-    else:
-        choice = (options.resolver or ImageResolver()).resolve(toolchain.image_version)
+    toolchain = infer_toolchain(commits)
+    choice = choose_image(toolchain, options.image, options.resolver)
     image = choice.reference
+    document = toolchain_document(options.source, commits, toolchain, choice)
+    (out / "toolchain.json").write_text(json.dumps(document, indent=2) + "\n")
     has_lockfile = git.show_file(base, "Cargo.lock") is not None
     log(f"toolchain {toolchain.version}: {toolchain.reason}")
     log(f"image     {image}")

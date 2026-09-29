@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Annotated
@@ -23,6 +24,12 @@ from cargorewind.rewind import RewindOptions, RewindReport, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
 from cargorewind.splitreport import resolve_commits, split_commit
 from cargorewind.toolchain import ToolchainError
+from cargorewind.toolchainreport import (
+    choose_image,
+    decision_lines,
+    infer_toolchain,
+    toolchain_document,
+)
 
 app = typer.Typer(
     name="cargorewind",
@@ -122,6 +129,50 @@ def split_command(
     if not checks.ok:
         typer.echo(f"error: {checks.error()}", err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("toolchain")
+def toolchain_command(
+    source: Annotated[str, typer.Argument(help="Git URL, local repository or git bundle.")],
+    sha: Annotated[
+        str,
+        typer.Argument(
+            help="The fix commit: files are read at its base, the date rule uses its date."
+        ),
+    ],
+    base: Annotated[
+        str | None, typer.Option("--base", help="Base commit (default: first parent of fix).")
+    ] = None,
+    json_out: Annotated[
+        Path | None, typer.Option("--json", help="Also write the report as toolchain.json.")
+    ] = None,
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", help="Checkout directory (default: .cargorewind/)."),
+    ] = None,
+    registry: Annotated[bool, REGISTRY_OPTION] = False,
+    cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
+) -> None:
+    """Infer the toolchain and base image for a fix commit and print every decision."""
+    try:
+        workdir = workdir or Path(".cargorewind") / repo_slug(source)
+        git = open_checkout(SubprocessRunner(), source, workdir)
+        commits = resolve_commits(git, sha, base, typer.echo)
+        toolchain = infer_toolchain(commits)
+        for line in decision_lines(toolchain):
+            typer.echo(line)
+        typer.echo(f"toolchain {toolchain.version} ({toolchain.source}): {toolchain.reason}")
+        image = choose_image(toolchain, None, make_resolver(registry, cache_dir))
+    except (CommandError, GitError, ToolchainError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"image     {image.reference}")
+    typer.echo(f"          {image.source}: {image.reason}")
+    if json_out is not None:
+        document = toolchain_document(source, commits, toolchain, image)
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(document, indent=2) + "\n")
+        typer.echo(f"wrote     {json_out}")
 
 
 @app.command("rewind")
