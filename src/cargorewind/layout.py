@@ -1,7 +1,9 @@
 """Classify files by their role in a Cargo layout.
 
 Packages come from every ``Cargo.toml`` with a ``[package]`` table; ``[workspace]
-members`` globs (with ``exclude``) decide which workspace, if any, lists each one.
+members`` globs (with ``exclude``) decide which workspace, if any, lists each one. A
+package inside a ``tests/`` directory of an enclosing package or workspace that no
+enclosing workspace lists is a fixture crate: test data of that package, not a package.
 Targets come from ``[lib]``, ``[[bin]]``, ``[[test]]``, ``[[bench]]``, ``[[example]]``
 and ``package.build`` (custom paths included) plus Cargo's auto-discovery
 (``src/lib.rs``, ``src/main.rs``, ``src/bin/``, ``tests/``, ``benches/``, ``examples/``,
@@ -25,7 +27,7 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any, Protocol
 
-from cargorewind.rustscan import FileScan, ModuleDecl, scan_source
+from cargorewind.rustscan import FileScan, ModuleDecl, TestRegion, scan_source
 
 
 class Role(StrEnum):
@@ -162,6 +164,22 @@ def _relative(path: str, folder: str) -> str | None:
     return path[len(folder) + 1 :] if path.startswith(folder + "/") else None
 
 
+def _fixture_owner(root: str, manifest_dirs: list[str], workspace: str | None) -> str | None:
+    """Manifest directory whose ``tests/`` holds the package at ``root``, if it is a fixture.
+
+    A package that an enclosing workspace lists is a real member wherever it sits. One
+    that only its own ``[workspace]`` (or none) lists, below a ``tests`` directory of an
+    enclosing package or workspace, is test data (for example ``tests/fixtures/<name>``).
+    """
+    if workspace not in (None, root):
+        return None
+    for folder in sorted(manifest_dirs, key=len, reverse=True):
+        rel = _relative(root, folder)
+        if folder != root and rel is not None and "tests" in rel.split("/"):
+            return folder
+    return None
+
+
 def _strings(value: Any) -> list[str]:
     return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
 
@@ -177,8 +195,11 @@ class Layout:
         self.tree = tree
         self.paths = tree.paths()
         self.notes: list[str] = []
+        self.fixtures: dict[str, str] = {}  # fixture crate root -> the manifest dir it is in
         self._scans: dict[str, FileScan] = {}
         self._reached: dict[str, list[_Reach]] = {}
+        # (declaring file, declaration, module file) for every resolved ``mod name;``
+        self._decls: set[tuple[str, ModuleDecl, str]] = set()
         self._wanted = None if wanted is None else frozenset(wanted)
         self._wanted_dirs: set[str] = set()
         for path in self._wanted or ():
@@ -230,15 +251,21 @@ class Layout:
                 listed = rel == "" or any(glob_match(m, rel) for m in members)
                 if listed and not excluded:
                     workspace_of[root] = ws_root
-        return [
-            Package(
-                root,
-                self._package_name(root, manifests[root]),
-                workspace_of.get(root),
-                self._targets(root, manifests[root]),
+        packages: list[Package] = []
+        for root in package_roots:
+            owner = _fixture_owner(root, list(manifests), workspace_of.get(root))
+            if owner is not None:
+                self.fixtures[root] = owner
+                continue
+            packages.append(
+                Package(
+                    root,
+                    self._package_name(root, manifests[root]),
+                    workspace_of.get(root),
+                    self._targets(root, manifests[root]),
+                )
             )
-            for root in package_roots
-        ]
+        return packages
 
     @staticmethod
     def _package_name(root: str, data: dict[str, Any]) -> str:
@@ -367,12 +394,41 @@ class Layout:
                 if resolved is None:
                     continue
                 child, child_mod_rs = resolved
+                self._decls.add((path, decl, child))
                 why = f"module `{decl.name}` of {target.label}, declared at {path}:{decl.line}"
                 if decl.cfg_test:
                     why += " under cfg(test)"
                 stack.append((child, child_mod_rs, test_only or decl.cfg_test, why))
 
+    def test_module_decls(self, path: str) -> list[TestRegion]:
+        """Plain ``mod name;`` declarations in ``path`` that load a test-only file.
+
+        A module file that starts with ``#![cfg(test)]`` only builds for tests, so the
+        declaration that loads it belongs with it in the test patch.
+        """
+        found: set[TestRegion] = set()
+        for parent, decl, child in self._decls:
+            if parent != path or decl.cfg_test:
+                continue
+            scan = self._scan(child)
+            file_region = (
+                next((r for r in scan.regions if r.kind == "file"), None) if scan else None
+            )
+            if file_region is not None:
+                start, end = decl.span
+                found.add(TestRegion(start, end, "module-decl", decl.name, file_region.cfg))
+        return sorted(found, key=lambda r: (r.start_line, r.end_line))
+
+    def declared_in(self, path: str) -> list[str]:
+        """Files whose ``mod`` declarations load ``path`` (as far as the walk went)."""
+        return sorted({parent for parent, _, child in self._decls if child == path})
+
     # Classification
+
+    def fixture_of(self, path: str) -> str | None:
+        """Root of the fixture crate that contains ``path``, if any."""
+        found = [root for root in self.fixtures if _relative(path, root) is not None]
+        return max(found, key=len) if found else None
 
     def package_of(self, path: str) -> Package | None:
         best: Package | None = None
@@ -387,6 +443,11 @@ class Layout:
         package = self.package_of(path)
         package_root = package.display_root if package else None
         name = posixpath.basename(path)
+        fixture = self.fixture_of(path)
+        if fixture is not None and path not in self._reached:
+            owner = self.fixtures[fixture] or "."
+            reason = f"in fixture crate {fixture} (under tests/ of {owner}, no workspace lists it)"
+            return FileInfo(path, Role.TEST, package_root, None, True, reason)
         if name == "Cargo.lock":
             return FileInfo(path, Role.LOCKFILE, package_root, None, False, "Cargo.lock")
         if name == "Cargo.toml":
@@ -411,11 +472,14 @@ class Layout:
             folder = posixpath.dirname(folder)
         rel = _relative(path, package.root) if package else path
         parts = (rel or path).split("/")
-        if len(parts) > 1 and parts[0] in _CONVENTION_DIRS:
-            role = _CONVENTION_DIRS[parts[0]]
-            return FileInfo(path, role, root, None, role is Role.TEST, f"under {parts[0]}/")
+        dirs = parts[:-1]
+        if "tests" in dirs[1:]:
+            # Data next to test modules (src/tests/data/..., benches/tests/...): the module
+            # walk cannot reach it, and only tests read it.
+            return FileInfo(path, Role.TEST, root, None, True, "inside a tests/ directory")
+        if dirs and dirs[0] in _CONVENTION_DIRS:
+            role = _CONVENTION_DIRS[dirs[0]]
+            return FileInfo(path, role, root, None, role is Role.TEST, f"under {dirs[0]}/")
         if parts == ["build.rs"]:
             return FileInfo(path, Role.BUILD_SCRIPT, root, None, False, "build.rs")
-        if "tests" in path.split("/")[:-1]:
-            return FileInfo(path, Role.TEST, root, None, True, "inside a tests/ directory")
         return FileInfo(path, Role.OTHER, root, None, False, "not part of a Cargo target")

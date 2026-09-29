@@ -275,3 +275,93 @@ def test_inline_path_attribute_inside_a_non_mod_rs_file() -> None:
 )
 def test_glob_match(pattern: str, path: str, matches: bool) -> None:
     assert glob_match(pattern, path) is matches
+
+
+def test_packages_under_tests_that_no_workspace_lists_are_fixture_data() -> None:
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[package]\nname = "tool"\n',
+            "src/lib.rs": "pub fn count() {}\n",
+            "tests/cli.rs": "#[test]\nfn reads_fixture() {}\n",
+            "tests/fixtures/wide/Cargo.toml": '[package]\nname = "wide"\n',
+            "tests/fixtures/wide/Cargo.lock": "version = 3\n",
+            "tests/fixtures/wide/src/lib.rs": "pub fn w() {}\n",
+            # A fixture with its own [workspace] table is still a fixture.
+            "tests/fixtures/ws/Cargo.toml": '[package]\nname = "ws"\n[workspace]\n',
+            "tests/fixtures/ws/src/main.rs": "fn main() {}\n",
+        }
+    )
+    layout = Layout(tree)
+    assert [p.name for p in layout.packages] == ["tool"]
+    assert layout.fixtures == {"tests/fixtures/wide": "", "tests/fixtures/ws": ""}
+    for path in (
+        "tests/fixtures/wide/Cargo.toml",
+        "tests/fixtures/wide/Cargo.lock",
+        "tests/fixtures/wide/src/lib.rs",
+        "tests/fixtures/ws/src/main.rs",
+    ):
+        info = layout.classify(path)
+        assert (info.role, info.test_code, info.package) == (Role.TEST, True, "."), path
+        assert "fixture crate" in info.reason
+    assert layout.classify("src/lib.rs").role is Role.SOURCE
+
+
+def test_workspace_members_under_tests_stay_packages() -> None:
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[workspace]\nmembers = ["tests/harness", "crates/*"]\n',
+            "tests/harness/Cargo.toml": '[package]\nname = "harness"\n',
+            "tests/harness/src/lib.rs": "pub fn h() {}\n",
+            "crates/a/Cargo.toml": '[package]\nname = "a"\n',
+            "crates/a/src/lib.rs": "pub fn a() {}\n",
+            "crates/a/tests/fixtures/b/Cargo.toml": '[package]\nname = "b"\n',
+            "crates/a/tests/fixtures/b/src/lib.rs": "pub fn b() {}\n",
+        }
+    )
+    layout = Layout(tree)
+    assert sorted(p.name for p in layout.packages) == ["a", "harness"]
+    assert layout.fixtures == {"crates/a/tests/fixtures/b": "crates/a"}
+    assert layout.classify("tests/harness/src/lib.rs").role is Role.SOURCE
+    manifest = layout.classify("crates/a/tests/fixtures/b/Cargo.toml")
+    assert (manifest.role, manifest.package) == (Role.TEST, "crates/a")
+
+
+def test_data_inside_tests_directories_below_src_is_test_data() -> None:
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[package]\nname = "p"\n',
+            "src/lib.rs": "pub fn parse() {}\n#[cfg(test)]\nmod tests;\n",
+            "src/tests.rs": 'const C: &str = include_str!("tests/data/case1.txt");\n',
+            "src/tests/data/case1.txt": "1\n",
+            "src/assets/table.txt": "t\n",
+        }
+    )
+    layout = Layout(tree)
+    data = layout.classify("src/tests/data/case1.txt")
+    assert (data.role, data.test_code, data.reason) == (
+        Role.TEST,
+        True,
+        "inside a tests/ directory",
+    )
+    assert layout.classify("src/tests.rs").test_code
+    assert layout.classify("src/assets/table.txt").role is Role.SOURCE
+
+
+def test_module_declarations_of_test_only_files() -> None:
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[package]\nname = "p"\n',
+            "src/lib.rs": "mod util;\n#[allow(unused)]\nmod tests;\n#[cfg(test)]\nmod more;\n",
+            "src/util.rs": "pub fn u() {}\n",
+            "src/tests.rs": "#![cfg(test)]\nfn t() {}\n",
+            "src/more.rs": "#![cfg(test)]\nfn m() {}\n",
+        }
+    )
+    layout = Layout(tree)
+    decls = layout.test_module_decls("src/lib.rs")
+    assert [(r.start_line, r.end_line, r.kind, r.name, r.cfg) for r in decls] == [
+        (2, 3, "module-decl", "tests", "test")
+    ]
+    assert layout.test_module_decls("src/util.rs") == []
+    assert layout.declared_in("src/tests.rs") == ["src/lib.rs"]
+    assert layout.declared_in("src/lib.rs") == []

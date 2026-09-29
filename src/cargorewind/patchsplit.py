@@ -16,11 +16,12 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from cargorewind.layout import Layout, Package, Role, SourceTree
+from cargorewind.layout import FileInfo, Layout, Package, Role, SourceTree
 from cargorewind.rustscan import TestRegion, in_regions, scan_source
 
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _DIFF_GIT = "diff --git "
+NO_NEWLINE = "\\ No newline at end of file"
 
 
 class PatchError(ValueError):
@@ -162,8 +163,14 @@ def _parse_file(lines: list[str]) -> FileDiff:
 
 
 def parse_diff(text: str) -> list[FileDiff]:
-    """Parse ``git diff`` output (``--no-renames``) into per-file diffs."""
-    lines = text.splitlines()
+    """Parse ``git diff`` output (``--no-renames``) into per-file diffs.
+
+    Lines are split on ``\\n`` only: a CRLF file keeps its ``\\r`` and a form feed stays
+    inside its line (``str.splitlines`` would break both).
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
     starts = [n for n, line in enumerate(lines) if line.startswith(_DIFF_GIT)]
     if lines and (not starts or starts[0] != 0):
         raise PatchError("diff text must start with 'diff --git'")
@@ -276,27 +283,78 @@ def _line_sides(
     return sides
 
 
-def _project(lines: list[str], sides: list[Side | None], keep: Side) -> list[str]:
-    """Hunk lines as seen by the patch for ``keep``.
+@dataclass(frozen=True)
+class _Line:
+    """One content line of a hunk and whether it ends with a newline."""
+
+    tag: str  # " ", "-" or "+"
+    text: str
+    side: Side | None
+    eol: bool = True
+
+
+def _hunk_entries(lines: list[str], sides: list[Side | None]) -> tuple[list[_Line], str]:
+    """Content lines with their newline flags, and the marker text the hunk used."""
+    entries: list[_Line] = []
+    marker = NO_NEWLINE
+    for line, side in zip(lines, sides, strict=True):
+        if line[:1] == "\\":
+            marker = line
+            if entries:
+                last = entries[-1]
+                entries[-1] = _Line(last.tag, last.text, last.side, eol=False)
+            continue
+        entries.append(_Line(line[:1], line[1:], side))
+    return entries, marker
+
+
+def _in_images(entry: _Line, keep: Side) -> tuple[bool, bool]:
+    """Whether ``entry`` is in the old and in the new image of the patch for ``keep``.
 
     The intermediate tree (base plus test patch) holds context lines, removed fix lines
     and added test lines. Changes of the other side become context or disappear.
     """
+    if entry.tag == " ":
+        return True, True
+    if entry.tag == "-":
+        return (
+            (True, entry.side is Side.FIX) if keep is Side.TEST else (entry.side is Side.FIX, False)
+        )
+    return (
+        (False, entry.side is Side.TEST) if keep is Side.TEST else (entry.side is Side.TEST, True)
+    )
+
+
+def _project(lines: list[str], sides: list[Side | None], keep: Side) -> list[str]:
+    """Hunk lines as seen by the patch for ``keep``.
+
+    Newline markers are recomputed per image. Only the last line of a file can lack its
+    newline; when test lines are added after a base line that had none, that line gains
+    one in the intermediate tree, so it is emitted as a removed and an added line (a bare
+    context line would glue the next line onto it).
+    """
+    entries, marker = _hunk_entries(lines, sides)
+    mid = [e.tag == " " or (e.tag == "-") == (e.side is Side.FIX) for e in entries]
+    mid_last = max((n for n, member in enumerate(mid) if member), default=-1)
+
+    def mid_eol(n: int) -> bool:
+        return entries[n].eol if n == mid_last else True
+
     out: list[str] = []
-    dropped = False
-    for line, side in zip(lines, sides, strict=True):
-        tag = line[:1]
-        if tag == "\\":
-            if not dropped:
-                out.append(line)
+    for n, entry in enumerate(entries):
+        in_old, in_new = _in_images(entry, keep)
+        old_eol = entry.eol if keep is Side.TEST else mid_eol(n)
+        new_eol = mid_eol(n) if keep is Side.TEST else entry.eol
+        if in_old and in_new and old_eol == new_eol:
+            out.append(" " + entry.text)
+            out.extend([] if old_eol else [marker])
             continue
-        dropped = False
-        if side is None or side is keep:
-            out.append(line)
-        elif (tag == "-" and keep is Side.TEST) or (tag == "+" and keep is Side.FIX):
-            out.append(" " + line[1:])
-        else:
-            dropped = True
+        if in_old:
+            out.append("-" + entry.text)
+            out.extend([] if old_eol else [marker])
+        if in_new:
+            out.append("+" + entry.text)
+            out.extend([] if new_eol else [marker])
     return out
 
 
@@ -372,19 +430,32 @@ def _status(diff: FileDiff) -> str:
     return "deleted" if diff.is_deleted else "modified"
 
 
-def _route_rust(diff: FileDiff, base: SourceTree, fix: SourceTree, result: SplitResult) -> str:
+def _route_rust(
+    diff: FileDiff,
+    trees: tuple[SourceTree, SourceTree],
+    layouts: tuple[Layout, Layout],
+    result: SplitResult,
+) -> str:
     """Split one non-test Rust file; returns which patch(es) it went to."""
-    revision, tree = ("base", base) if diff.is_deleted else ("fix", fix)
+    base, fix = trees
+    base_layout, fix_layout = layouts
+    revision, tree, layout = (
+        ("base", base, base_layout) if diff.is_deleted else ("fix", fix, fix_layout)
+    )
     current = tree.read(diff.path)
     scan = scan_source(current) if current is not None else None
     if scan is not None:
-        result.regions.extend(RegionReport(diff.path, revision, r) for r in scan.regions)
+        decls = layout.test_module_decls(diff.path)
+        regions = sorted([*scan.regions, *decls], key=lambda r: (r.start_line, -r.end_line))
+        result.regions.extend(RegionReport(diff.path, revision, r) for r in regions)
     if diff.hunks and not diff.is_new and not diff.is_deleted and scan is not None:
         base_src = base.read(diff.path)
         if base_src is not None:
-            test_part, fix_part = _split_rust_file(
-                diff, scan_source(base_src).spans, scan.spans, result
-            )
+            base_spans = scan_source(base_src).spans + [
+                (r.start_line, r.end_line) for r in base_layout.test_module_decls(diff.path)
+            ]
+            fix_spans = scan.spans + [(r.start_line, r.end_line) for r in decls]
+            test_part, fix_part = _split_rust_file(diff, base_spans, fix_spans, result)
             if test_part is not None:
                 result.test_files.append(test_part)
             if fix_part is not None:
@@ -398,31 +469,53 @@ def _route_rust(diff: FileDiff, base: SourceTree, fix: SourceTree, result: Split
     return "fix"
 
 
+def _whole_fix_declarer(diff: FileDiff, layout: Layout, whole: set[str]) -> str | None:
+    """A new (or deleted) file that declares this new (or deleted) test-only module file.
+
+    That file goes whole to fix.patch with its ``mod`` line, so the module file goes with
+    it: alone in test.patch it would be an orphan (added) or leave a dangling ``mod``
+    declaration that does not compile (deleted).
+    """
+    if not (diff.is_new or diff.is_deleted):
+        return None
+    for parent in layout.declared_in(diff.path):
+        if parent in whole and not layout.classify(parent).test_code:
+            return parent
+    return None
+
+
 def split_diff(files: list[FileDiff], base: SourceTree, fix: SourceTree) -> SplitResult:
     """Route every file (or, for Rust sources, every changed line) to a side."""
-    base_layout = Layout(base, [d.path for d in files if d.is_deleted])
+    base_layout = Layout(base, [d.path for d in files if not d.is_new])
     fix_layout = Layout(fix, [d.path for d in files if not d.is_deleted])
     result = SplitResult(packages=list(fix_layout.packages))
     result.notes.extend(fix_layout.notes)
+    whole = {d.path for d in files if d.is_new or d.is_deleted}
     for diff in files:
-        info = (base_layout if diff.is_deleted else fix_layout).classify(diff.path)
-        if info.test_code:
+        layout = base_layout if diff.is_deleted else fix_layout
+        info = layout.classify(diff.path)
+        declarer = _whole_fix_declarer(diff, layout, whole) if info.test_code else None
+        if declarer is not None:
+            what = "new" if diff.is_new else "deleted"
+            result.notes.append(
+                f"{diff.path}: test-only module kept in fix.patch with {declarer}, "
+                f"the {what} file that declares it"
+            )
+            result.fix_files.append(diff)
+            patch = "fix"
+        elif info.test_code:
             result.test_files.append(diff)
             patch = "test"
         elif diff.path.endswith(".rs"):
-            patch = _route_rust(diff, base, fix, result)
+            patch = _route_rust(diff, (base, fix), (base_layout, fix_layout), result)
         else:
             result.fix_files.append(diff)
             patch = "fix"
-        result.files.append(
-            FileSplit(
-                diff.path,
-                _status(diff),
-                info.role,
-                info.package,
-                info.target,
-                patch,
-                info.reason,
-            )
-        )
+        result.files.append(_file_split(diff, info, patch))
     return result
+
+
+def _file_split(diff: FileDiff, info: FileInfo, patch: str) -> FileSplit:
+    return FileSplit(
+        diff.path, _status(diff), info.role, info.package, info.target, patch, info.reason
+    )

@@ -25,30 +25,18 @@ from cargorewind.rustlex import Token, TokenKind, string_value, tokenize
 
 TEST_ATOMS = frozenset({"test", "doctest"})
 
-# Items that end at a top-level ``;`` or at the ``}`` that closes their body. Anything
-# else under an attribute (a field, variant, match arm or expression) also ends at a
-# top-level comma.
-ITEM_KEYWORDS = frozenset(
-    {
-        "async",
-        "const",
-        "crate",
-        "enum",
-        "extern",
-        "fn",
-        "impl",
-        "let",
-        "macro_rules",
-        "mod",
-        "static",
-        "struct",
-        "trait",
-        "type",
-        "union",
-        "unsafe",
-        "use",
-    }
-)
+# How an attributed item, statement, field or arm ends (see ``_item_end``):
+# - "semi" items end at the top-level ``;`` (``let``, ``static``, ``const X``, ``use``, ``type``);
+# - "body" items end at the ``}`` of their body, or at a top-level ``;`` when they have none
+#   (``fn``, ``impl``, ``struct``, macro calls); braces inside ``<...>`` are not the body;
+# - "block" expressions (``if``, ``match``, loops, ``unsafe {``, blocks) end at their ``}``,
+#   unless ``else`` follows: Rust ends a block-like expression statement there;
+# - anything else (fields, variants, match arms, expressions) ends at a top-level comma or
+#   ``;``, or at a closing ``}`` unless an operator follows. An arm whose body after ``=>``
+#   is block-like ends at that body's ``}``.
+_SEMI_ITEMS = frozenset({"let", "static", "type", "use"})
+_BODY_ITEMS = frozenset({"enum", "fn", "impl", "macro_rules", "mod", "struct", "trait", "union"})
+_BLOCK_EXPRS = frozenset({"for", "if", "loop", "match", "while"})
 _NAMED_ITEMS = frozenset(
     {"const", "enum", "fn", "macro_rules", "mod", "static", "struct", "trait", "type", "union"}
 )
@@ -95,10 +83,17 @@ class ModuleDecl:
     """An out-of-line ``mod name;`` declaration."""
 
     name: str
-    line: int
+    line: int  # the line of the ``mod`` keyword
     inline_path: tuple[str, ...]
     path_attr: str | None
     cfg_test: bool
+    # First line (its first outer attribute) and last line (the ``;``) of the declaration.
+    start_line: int = field(default=0, compare=False)
+    end_line: int = field(default=0, compare=False)
+
+    @property
+    def span(self) -> tuple[int, int]:
+        return (self.start_line or self.line, self.end_line or self.line)
 
 
 @dataclass
@@ -196,27 +191,111 @@ def _skip_visibility(tokens: list[Token], i: int) -> int:
     return i
 
 
-def _item_mode(tokens: list[Token], first: int) -> bool:
-    head = tokens[first]
-    if head.kind is not TokenKind.IDENT:
+def _is_macro_call(tokens: list[Token], first: int) -> bool:
+    """``name!`` or ``path::to::name!`` at ``first``."""
+    j = first
+    while (
+        j + 3 < len(tokens)
+        and tokens[j].kind is TokenKind.IDENT
+        and tokens[j + 1].is_punct(":")
+        and tokens[j + 2].is_punct(":")
+    ):
+        j += 3
+    return j + 1 < len(tokens) and tokens[j].kind is TokenKind.IDENT and tokens[j + 1].is_punct("!")
+
+
+def _starts_block(tokens: list[Token], k: int) -> bool:
+    """True when the expression at ``k`` is block-like (ends at its closing brace)."""
+    if k >= len(tokens):
         return False
-    if head.text in ITEM_KEYWORDS:
+    tok = tokens[k]
+    nxt = tokens[k + 1] if k + 1 < len(tokens) else None
+    if tok.is_punct("{"):
         return True
-    return first + 1 < len(tokens) and tokens[first + 1].is_punct("!")  # macro call
+    if tok.kind is TokenKind.LIFETIME:  # a labeled loop or block: 'outer: loop { ... }
+        return nxt is not None and nxt.is_punct(":")
+    if tok.is_ident(*_BLOCK_EXPRS):
+        return True
+    return tok.is_ident("unsafe", "const") and nxt is not None and nxt.is_punct("{")
 
 
-def _item_end(tokens: list[Token], start: int) -> int:
-    """Index of the last token of the item, statement or field starting at ``start``."""
-    first = _skip_visibility(tokens, start)
-    if first >= len(tokens):
-        return len(tokens) - 1
-    item = _item_mode(tokens, first)
-    block = tokens[first].is_punct("{")
+def _head_mode(tokens: list[Token], first: int) -> str:
+    """How the item, statement or field starting at ``first`` ends: semi, body, block, expr."""
+    head = tokens[first]
+    nxt = tokens[first + 1] if first + 1 < len(tokens) else None
+    word = head.text if head.kind is TokenKind.IDENT else ""
+    if _starts_block(tokens, first):
+        mode = "block"
+    elif word in _SEMI_ITEMS:
+        mode = "semi"
+    elif word in _BODY_ITEMS or (word and _is_macro_call(tokens, first)):
+        mode = "body"
+    elif word == "const":  # const fn is an item with a body; const X: T = ...; is not
+        body = nxt is not None and nxt.is_ident("fn", "unsafe", "async", "extern")
+        mode = "body" if body else "semi"
+    elif word == "extern":
+        mode = "semi" if nxt is not None and nxt.is_ident("crate") else "body"
+    elif word in ("unsafe", "async"):  # unsafe fn, unsafe impl, async fn
+        mode = "body" if nxt is not None and nxt.kind is TokenKind.IDENT else "expr"
+    else:
+        mode = "expr"
+    return mode
+
+
+def _body_item_end(tokens: list[Token], start: int) -> int:
+    """End of an item with a body: its closing ``}``, or a ``;`` before any body."""
+    depth = angle = 0
+    in_body = False
+    for k in range(start, len(tokens)):
+        tok = tokens[k]
+        if tok.kind is not TokenKind.PUNCT:
+            continue
+        if depth == 0 and not in_body:
+            if tok.text == "<":
+                angle += 1
+                continue
+            if tok.text == ">" and angle and not tokens[k - 1].is_punct("-"):
+                angle -= 1
+                continue
+            if tok.text == ";":
+                return k
+            if tok.text == "{" and angle == 0:
+                in_body = True
+        if tok.text in "([{":
+            depth += 1
+        elif tok.text in ")]}":
+            depth -= 1
+            if depth < 0:
+                return max(k - 1, start)
+            if depth == 0 and tok.text == "}" and in_body:
+                return k
+    return len(tokens) - 1
+
+
+def _is_arrow(tokens: list[Token], k: int) -> bool:
+    return tokens[k].is_punct("=") and k + 1 < len(tokens) and tokens[k + 1].is_punct(">")
+
+
+def _closing_brace_end(tokens: list[Token], k: int, mode: str) -> int | None:
+    """At a top-level ``}``: the statement's last token index if it ends here, else None."""
+    nxt = tokens[k + 1] if k + 1 < len(tokens) else None
+    if mode == "semi" or (nxt is not None and nxt.is_ident("else")):
+        return None
+    if mode == "arm":  # a block body after =>, with its optional comma
+        return k + 1 if nxt is not None and nxt.is_punct(",") else k
+    continues = nxt is not None and (
+        (nxt.kind is TokenKind.PUNCT and nxt.text in _CONTINUES_AFTER_BRACE) or nxt.is_ident("as")
+    )
+    return None if mode == "expr" and continues else k
+
+
+def _statement_end(tokens: list[Token], start: int, mode: str) -> int:
     depth = 0
     for k in range(start, len(tokens)):
         tok = tokens[k]
         if tok.kind is not TokenKind.PUNCT:
             continue
+        end: int | None = None
         if tok.text in "([{":
             depth += 1
         elif tok.text in ")]}":
@@ -224,18 +303,25 @@ def _item_end(tokens: list[Token], start: int) -> int:
             if depth < 0:
                 return max(k - 1, start)
             if depth == 0 and tok.text == "}":
-                if item or block:
-                    return k
-                nxt = tokens[k + 1] if k + 1 < len(tokens) else None
-                continues = nxt is not None and (
-                    (nxt.kind is TokenKind.PUNCT and nxt.text in _CONTINUES_AFTER_BRACE)
-                    or nxt.is_ident("as", "else")
-                )
-                if not continues:
-                    return k
-        elif depth == 0 and (tok.text == ";" or (tok.text == "," and not item)):
-            return k
+                end = _closing_brace_end(tokens, k, mode)
+        elif depth == 0 and (tok.text == ";" or (tok.text == "," and mode == "expr")):
+            end = k
+        elif depth == 0 and mode == "expr" and _is_arrow(tokens, k):
+            mode = "arm" if _starts_block(tokens, k + 2) else mode
+        if end is not None:
+            return end
     return len(tokens) - 1
+
+
+def _item_end(tokens: list[Token], start: int) -> int:
+    """Index of the last token of the item, statement or field starting at ``start``."""
+    first = _skip_visibility(tokens, start)
+    if first >= len(tokens):
+        return len(tokens) - 1
+    mode = _head_mode(tokens, first)
+    if mode == "body":
+        return _body_item_end(tokens, start)
+    return _statement_end(tokens, start, mode)
 
 
 def _item_label(tokens: list[Token], start: int) -> tuple[str, str]:
@@ -300,10 +386,12 @@ class _Scanner:
         start = attrs[0].line if attrs else self.tokens[i].line
         if delimiter == ";":
             path = next((a.path for a in reversed(attrs) if a.path is not None), None)
-            decl_line = self.tokens[i].line
-            self.scan.modules.append(ModuleDecl(name, decl_line, self._inline_path(), path, False))
+            decl_line, end = self.tokens[i].line, self.tokens[i + 2].line
+            self.scan.modules.append(
+                ModuleDecl(name, decl_line, self._inline_path(), path, False, start, end)
+            )
             if cfg is not None:
-                self._region(start, self.tokens[i + 2].line, "module-decl", name, cfg)
+                self._region(start, end, "module-decl", name, cfg)
         else:
             self.pending = _Frame(self.tokens[i + 2].line, name, cfg, region_line=start)
         return i + 2
@@ -376,6 +464,8 @@ class _Scanner:
                 m.inline_path,
                 m.path_attr,
                 self.scan.file_cfg_test or in_regions(m.line, spans),
+                m.start_line,
+                m.end_line,
             )
             for m in self.scan.modules
         ]

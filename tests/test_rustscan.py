@@ -247,3 +247,192 @@ def test_malformed_cfg_is_not_test_only() -> None:
 def test_in_regions() -> None:
     assert in_regions(5, [(1, 3), (5, 9)])
     assert not in_regions(4, [(1, 3), (5, 9)])
+
+
+def _region_lines(src: str) -> list[tuple[str, str, int, int]]:
+    return [(r.kind, r.name, r.start_line, r.end_line) for r in scan_source(src).regions]
+
+
+def test_block_like_statements_end_at_their_closing_brace() -> None:
+    # Rust ends an if/for/match/loop/while statement at its brace, even when the next
+    # statement starts with an operator (review finding: the region swallowed it).
+    src = """\
+pub fn bump(c: &mut Counter, total: &mut u32) {
+    #[cfg(test)]
+    if c.fail_next {
+        c.fail_next = false;
+    }
+    *total += 2;
+    c.hits += 1;
+    #[cfg(test)]
+    for i in 0..3 {
+        log(i);
+    }
+    -1i32;
+    #[cfg(test)]
+    match c.mode {
+        Mode::A => {}
+    }
+    &total;
+    #[cfg(test)]
+    'outer: loop {
+        break 'outer;
+    }
+    |x: u8| x;
+    #[cfg(test)]
+    if a {
+        b();
+    } else if c {
+        d();
+    } else {
+        e();
+    }
+    <u8>::default();
+    #[cfg(test)]
+    unsafe {
+        f();
+    }
+    *total = 5;
+}
+"""
+    assert _region_lines(src) == [
+        ("item", "if", 2, 5),
+        ("item", "for", 8, 11),
+        ("item", "match", 13, 16),
+        ("item", "'outer", 18, 21),
+        ("item", "if", 23, 30),
+        ("block", "", 32, 35),
+    ]
+    scan = scan_source(
+        "fn run(p: &mut u32) {\n    #[cfg(test)]\n    for i in 0..3 {\n        log(i);\n"
+        "    }\n    *p = 5;\n}\n"
+    )
+    assert [(r.start_line, r.end_line) for r in scan.regions] == [(2, 5)]
+
+
+def test_let_static_and_const_items_end_at_their_semicolon() -> None:
+    src = """\
+fn scale(x: u32) -> u32 {
+    let y = x;
+    #[cfg(test)]
+    let _probe = if y > 100 {
+        100
+    } else {
+        y
+    };
+    #[cfg(test)]
+    let c = Config {
+        a: 1,
+    }
+    .with_b(2);
+    y * 3
+}
+#[cfg(test)]
+static TABLE: [u8; 2] = {
+    [1, 2]
+};
+#[cfg(test)]
+const LIMIT: u32 = {
+    3
+} + 1;
+#[cfg(test)]
+const fn helper() -> u8 {
+    1
+}
+#[cfg(test)]
+use std::{
+    fmt,
+};
+#[cfg(test)]
+extern crate alloc;
+"""
+    assert _region_lines(src) == [
+        ("item", "let", 3, 8),
+        ("item", "let", 9, 13),
+        ("item", "static TABLE", 16, 19),
+        ("item", "const LIMIT", 20, 23),
+        ("item", "const fn", 24, 27),
+        ("item", "use", 28, 31),
+        ("item", "crate", 32, 33),
+    ]
+
+
+def test_item_bodies_skip_braces_in_generics_and_signatures() -> None:
+    src = """\
+#[cfg(test)]
+impl Foo<{ N }> {
+    fn f() {}
+}
+#[cfg(test)]
+impl<F: Fn() -> u8> Bar<{ M }> for F where F: Copy {
+    fn g() {}
+}
+#[cfg(test)]
+fn sized() -> [u8; { 3 }] {
+    [0; 3]
+}
+#[cfg(test)]
+struct Unit<const N: usize = { 1 }>;
+#[cfg(test)]
+struct Wrapper(u8);
+fn next() {}
+#[cfg(test)]
+thread_local! {
+    static X: u8 = 1;
+}
+#[cfg(test)]
+std::thread_local! {
+    static Y: u8 = 1;
+}
+*x;
+#[cfg(test)]
+unsafe impl Send for Foo {}
+#[cfg(test)]
+async fn later() {}
+"""
+    assert _region_lines(src) == [
+        ("item", "impl", 1, 4),
+        ("item", "impl", 5, 8),
+        ("item", "fn sized", 9, 12),
+        ("item", "struct Unit", 13, 14),
+        ("item", "struct Wrapper", 15, 16),
+        ("item", "thread_local", 18, 21),
+        ("item", "std", 22, 25),
+        ("item", "impl", 27, 28),
+        ("item", "fn later", 29, 30),
+    ]
+
+
+def test_match_arms_with_block_bodies_end_at_the_body() -> None:
+    src = """\
+fn f(x: i32) -> i32 {
+    match x {
+        #[cfg(test)]
+        0 => {
+            1
+        }
+        -1 => 2,
+        #[cfg(test)]
+        1 => if x > 0 {
+            3
+        } else {
+            4
+        },
+        &2 => 5,
+        #[cfg(test)]
+        3 => Foo { a: 1 }.get(),
+        _ => 6,
+    }
+}
+"""
+    assert _region_lines(src) == [
+        ("item", "0", 3, 6),
+        ("item", "1", 8, 13),
+        ("item", "3", 15, 16),
+    ]
+
+
+def test_declaration_spans_cover_attributes() -> None:
+    scan = scan_source('mod a;\n#[allow(dead_code)]\n#[path = "b.rs"]\nmod b;\n')
+    assert [m.span for m in scan.modules] == [(1, 1), (2, 4)]
+    assert ModuleDecl("x", 3, (), None, False).span == (3, 3)
