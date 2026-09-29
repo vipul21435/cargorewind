@@ -15,10 +15,10 @@ concurrency:
 jobs:
   checks:
     name: lint, typecheck, tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.29"
           enable-cache: true
@@ -33,11 +33,11 @@ jobs:
 
   docker:
     name: docker build and demo
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: checks
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.29"
           enable-cache: true
