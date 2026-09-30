@@ -25,7 +25,14 @@ from cargorewind.batch import (
 from cargorewind.gitops import GitError
 from cargorewind.runner import CommandError, CommandResult, SubprocessRunner
 from tests.conftest import GitRepo
-from tests.test_rewind import DEMO, PASSING, ScriptedBackend, _crate, _triple_crate
+from tests.test_rewind import (
+    DEMO,
+    PASSING,
+    TRIPLE_RUNS,
+    ScriptedBackend,
+    _crate,
+    _triple_crate,
+)
 
 FAILING = {**PASSING, "after": (101, "test tests::zero ... ok\ntest tests::two ... FAILED\n")}
 
@@ -122,7 +129,9 @@ def test_load_recipes_rejects_bad_files(tmp_path: Path, text: str, match: str) -
 def test_task_options_follow_the_task_then_the_batch(tmp_path: Path) -> None:
     options = BatchOptions(tmp_path / "out", tmp_path / "work", reruns=5, test_timeout=40)
     plain = task_options(BatchTask("r/x.bundle", "abc"), options, tmp_path / "out" / "x")
-    assert (plain.reruns, plain.test_timeout, plain.workdir) == (5, 40, tmp_path / "work" / "x")
+    checkout = tmp_path / "work" / BatchTask("r/x.bundle", "abc").checkout
+    assert (plain.reruns, plain.test_timeout, plain.workdir) == (5, 40, checkout)
+    assert checkout.name.startswith("x-") and len(checkout.name) == len("x-") + 8
     assert plain.index is None and plain.cache is None
     task = BatchTask("r/x.bundle", "abc", reruns=1, test_timeout=7, index_dir=tmp_path / "i")
     custom = task_options(task, options, tmp_path / "out" / "x")
@@ -362,3 +371,34 @@ def test_the_example_recipes_replay_two_real_flips_offline(tmp_path: Path) -> No
         ("serde", "1.0.155")
     ]
     assert exit_code([strsim, semver, again]) == 0
+
+
+def test_two_repositories_with_one_name_get_their_own_checkouts(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    """Forks share a slug; each needs its own checkout, or the second task would fetch
+    the first repository and not find its commit."""
+    first = make_repo("one")
+    _, fix_one = _crate(first, lockfile=True)
+    second = make_repo("two")
+    fix_two = _triple_crate(second)  # other content, so another fix commit
+    forks = tmp_path / "forks"
+    for repo, owner in ((first, "a"), (second, "b")):
+        (forks / owner).mkdir(parents=True)
+        (forks / owner / "crate").symlink_to(repo.path)
+    tasks = [
+        BatchTask(str(forks / "a" / "crate"), fix_one, name="a"),
+        BatchTask(str(forks / "b" / "crate"), fix_two, name="b"),
+    ]
+    assert tasks[0].slug == tasks[1].slug and tasks[0].checkout != tasks[1].checkout
+    options = BatchOptions(tmp_path / "out", tmp_path / "work", failures=(GitError,))
+    runs = {"a": PASSING, "b": TRIPLE_RUNS}
+    results = run_batch(
+        tasks,
+        options,
+        SubprocessRunner(),
+        lambda task: ScriptedBackend(runs[task.name or ""]),
+        lambda _: None,
+    )
+    assert [r.status for r in results] == ["verified", "verified"]
+    assert [r.fix_commit for r in results] == [fix_one, fix_two]

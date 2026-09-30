@@ -14,6 +14,7 @@ batch writes ``summary.json`` and ``summary.md`` next to them.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import tomllib
 from collections.abc import Callable
@@ -68,11 +69,17 @@ class BatchTask:
     def slug(self) -> str:
         return repo_slug(self.repo)
 
+    @property
+    def checkout(self) -> str:
+        """Checkout directory name: the slug and a digest of the source, so two
+        repositories that share a name (forks) never fetch into one checkout."""
+        return f"{self.slug}-{hashlib.sha256(self.repo.encode()).hexdigest()[:8]}"
+
 
 @dataclass(frozen=True)
 class BatchOptions:
     out: Path
-    workdir: Path  # one checkout per repository slug below it
+    workdir: Path  # one checkout per repository source below it (BatchTask.checkout)
     reruns: int = DEFAULT_RERUNS
     test_timeout: int = DEFAULT_TEST_TIMEOUT
     resolver: ImageResolver | None = None
@@ -220,7 +227,7 @@ def task_options(task: BatchTask, options: BatchOptions, out: Path) -> RewindOpt
         source=task.repo,
         fix=task.fix,
         out=out,
-        workdir=options.workdir / task.slug,
+        workdir=options.workdir / task.checkout,
         base=task.base,
         image=task.image,
         resolver=options.resolver,
@@ -235,7 +242,7 @@ def task_options(task: BatchTask, options: BatchOptions, out: Path) -> RewindOpt
 
 
 def _resolve(task: BatchTask, options: BatchOptions, runner: Runner) -> str:
-    git = open_checkout(runner, task.repo, options.workdir / task.slug)
+    git = open_checkout(runner, task.repo, options.workdir / task.checkout)
     return git.rev_parse(task.fix)
 
 
