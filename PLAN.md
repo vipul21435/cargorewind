@@ -439,6 +439,22 @@ green, pushed, and the README describes it with real output.
   `execute`, `build_image`, `targets_of`) over an `Execution` protocol that both
   reports implement.
 
+## Stashed work
+
+- `stash@{0}` "wip from interrupted agent" (stashed 2026-09-30 by the resume setup)
+  belongs to slice 6, the unticked `batch` part. It holds `src/cargorewind/batch.py`
+  (TOML recipes with `[defaults]`, dedupe by repository slug and resolved fix commit,
+  summary table, `summary.json` and `summary.md`), `tests/test_batch.py` (green with the
+  rest of the suite: 628 passed, 98% coverage), the `batch` command in `cli.py` (no CLI
+  test yet), `examples/batch.toml`, a semver `d92a4d8` git bundle with its LICENSE and a
+  transcript that is still empty (`"runs": {}`, the recording did not finish; the
+  `semver/index` directory that `batch.toml` names does not exist), and a strsim-rs
+  bundle that adds a `demo` ref at `f6a759324b`. Not committed because the second
+  crate's recording is incomplete and the CLI command is untested. A local live run of
+  strsim-rs `f6a759324b` reported a regression
+  (`tests::jaro_winkler_very_long_prefix`), which is presumably why semver was chosen
+  as the second crate instead. Restore with `git stash pop` when finishing slice 6.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
