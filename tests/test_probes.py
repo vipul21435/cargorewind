@@ -77,7 +77,7 @@ def test_definitions_find_items_and_skip_comments_strings_and_generics() -> None
     tricky = (
         "struct r#type;\nconst _: () = ();\nlet p: *const u8;\n"
         "fn g<const N: usize, const M: u8>() {}\n"
-        "const unsafe fn h() {}\nfn été() {}\nmacro_rules! {}\n"
+        "const unsafe fn h() {}\nfn \u00e9t\u00e9() {}\nmacro_rules! {}\n"
     )
     assert [(d.kind, d.name) for d in definitions(tricky)] == [("fn", "g"), ("fn", "h")]
 
