@@ -446,7 +446,7 @@ green, pushed, and the README describes it with real output.
   the working directory when they lie below it, so logs, `task.json` and the summary
   hold no absolute home paths.
 - Dedupe key: (repository slug, resolved fix commit), so a short and a full SHA, or a
-  bundle and a URL of one repository, are one task. The key is claimed only by a task
+  bundle and a URL of one repository, are one task. (Widened in the refresh below.) The key is claimed only by a task
   that reached a verdict; after an error the next spelling runs. The bundle directory
   is the task's `name` or `<slug>-<fix12>`; a name held by a task with a verdict is an
   error of the later task, never an overwrite.
@@ -479,6 +479,33 @@ green, pushed, and the README describes it with real output.
   index (sparse became the default in 1.70), which dominates the semver live time;
   setting the sparse protocol for 1.68 and 1.69 is left as a known issue because it
   would change those recipes.
+
+## Refresh 2026-09-30: review findings
+
+Five confirmed findings were fixed, each with regression tests:
+
+- Bundle names are claimed by `dir_key(name)` (NFD, casefold, NFC), so `Demo` and
+  `demo` (or two normalizations of one name) are one directory, as on APFS; the later
+  task is an error naming the owner. A samefile check was not added: the key covers
+  the default macOS file system and Linux is case-sensitive.
+- Dedupe key is now (slug, fix, resolved base, vendor, image). The base is the
+  explicit one or the first parent (empty for a root commit, which rewind rejects
+  later). Two unnamed tasks with one fix and different bases share the default name
+  `<slug>-<fix12>`, so the second is a name error; kept as a known issue rather than
+  inventing a longer default name.
+- `rewind` calls `bundle.clear_bundle(out)` before writing: it removes the bundle
+  files, `Cargo.lock`, `task.json`, `logs/*.log`, `verify/verify.json` and
+  `verify/logs/*.log`, and nothing else (no `rmtree` of a user-chosen `--out`).
+- `open_checkout` fetches only when `remote.origin.url` names the same source (URLs
+  compared as strings, local paths by `realpath`), otherwise it re-clones. Default
+  work directories of split, toolchain, lock and rewind are
+  `.cargorewind/<slug>-<sha256(identity)[:8]>`, verify's
+  `.cargorewind/verify-<dir>-<8 hex>` of the resolved bundle directory. Batch keeps
+  its own `BatchTask.checkout` key.
+- `gitops.is_remote` applies git's rule (`://`, or a colon before the first slash)
+  and, like `git clone`, an existing local path wins; the batch loader uses it.
+- The live-batch table in the README predates the new duplicate message; it is kept
+  as recorded and labeled as such rather than re-running 3 min 42 s of Docker.
 
 ## Stashed work
 

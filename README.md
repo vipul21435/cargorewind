@@ -266,17 +266,35 @@ table.
   reruns again. The new FAIL_TO_PASS and PASS_TO_PASS lists must equal the recorded
   ones. An inconsistent bundle is an error before anything is built (exit 1); a flip
   or a list that does not hold again is NOT VERIFIED (exit 2). The report goes to
-  `<bundle>/verify/` (`verify.json` and logs), never into the bundle's own files.
+  `<bundle>/verify/` (`verify.json` and logs), never into the bundle's own files. The
+  default checkout, `.cargorewind/verify-<dir>-<8 hex>`, is keyed by the resolved
+  bundle path, so two bundles in directories of one name never share it.
+- **A checkout only ever holds the source it was asked for.** The default work
+  directory of `split`, `toolchain`, `lock` and `rewind` is
+  `.cargorewind/<slug>-<8 hex>` (a digest of the URL, or of the resolved local path),
+  and an existing checkout is only fetched when its `origin` is that source; a
+  checkout of another source is cloned again.
+- **A bundle directory is rewritten, not topped up.** `rewind` first removes every
+  bundle file (the Dockerfile, patches, lists, reports, `Cargo.lock`, `task.json`,
+  `logs/*.log` and an earlier `verify/` result) from `--out`, so reusing a directory
+  never lets `task.json` vouch for another task's lockfile or logs. Other files there
+  are left alone.
 - **`cargorewind batch recipes.toml` for many fixes.** A TOML file lists `[[task]]`
   tables (`repo` and `fix`, optionally `base`, `name`, `vendor`, `image`,
   `index_dir`, `replay`, `reruns`, `test_timeout`) and `[defaults]` (`vendor`,
   `image`, `index_dir`, `reruns`, `test_timeout`) that every task inherits; unknown
   keys and wrong types are rejected with the task number. Local paths are relative to
-  the recipes file, and each repository source gets its own checkout. Two tasks are the same task when the repository slug
-  and the resolved fix commit agree (a bundle and a URL of one repository, a short and
-  a full SHA): once one has a verdict, the others are reported as duplicates and do
-  not run; after an error, the next spelling does run. Each task writes its own
-  bundle directory, an error in one task (a missing transcript, an unknown commit, a
+  the recipes file; `scheme://` URLs and git's scp-like `[user@]host:path` form (a
+  colon before the first slash, e.g. an `~/.ssh/config` alias `gh-work:owner/repo.git`)
+  stay URLs unless that path exists, as `git clone` decides. Each repository source
+  gets its own checkout. Two tasks are the same task when the repository slug, the
+  resolved fix commit, the resolved base commit (explicit, or the first parent),
+  `vendor` and `image` agree (a bundle and a URL of one repository, a short and a full
+  SHA): once one has a verdict, the others are reported as duplicates and do not run;
+  after an error, the next spelling does run. A task with another base is another
+  task. Each task writes its own bundle directory; bundle names are compared without
+  case and Unicode normalization (as APFS on macOS does), so `Demo` after `demo` is
+  an error of the later task, not a shared directory. An error in one task (a missing transcript, an unknown commit, a
   failed build) is recorded and the batch goes on, and the batch prints a summary
   table and writes it as `summary.json` and `summary.md`. `--live` ignores the replay
   files and runs every task through Docker.
@@ -303,21 +321,22 @@ make e2e         # needs Docker: the live e2e tests (flips, pin loops, verify, c
 
 ```sh
 cargorewind split <git-url | path | bundle> --fix <sha> [--base <sha>] [--out out/split]
-    [--workdir .cargorewind/<name>]
+    [--workdir .cargorewind/<name>-<digest>]
 cargorewind toolchain <git-url | path | bundle> <fix-sha> [--base <sha>]
-    [--json toolchain.json] [--workdir .cargorewind/<name>]
+    [--json toolchain.json] [--workdir .cargorewind/<name>-<digest>]
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
 cargorewind lock <git-url | path | bundle> <fix-sha> [--base <sha>] [--out out/lock]
-    [--workdir .cargorewind/<name>] [--registry | --offline] [--cache-dir <dir>]
+    [--workdir .cargorewind/<name>-<digest>] [--registry | --offline] [--cache-dir <dir>]
     [--index-dir <recorded index>] [--record t.json | --replay t.json] [--timeout 3600]
 cargorewind rewind <git-url | path | bundle> --fix <sha> [--base <sha>] [--out out]
-    [--workdir .cargorewind/<name>] [--image rust:X-slim@sha256:...]
+    [--workdir .cargorewind/<name>-<digest>] [--image rust:X-slim@sha256:...]
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
     [--vendor] [--index-dir <recorded index>]
     [--build-cache | --no-build-cache] [--rebuild]
     [--reruns 3] [--test-timeout 300]
     [--record transcript.json | --replay transcript.json] [--timeout 3600]
-cargorewind verify <bundle> [--out <bundle>/verify] [--workdir .cargorewind/verify-<name>]
+cargorewind verify <bundle> [--out <bundle>/verify]
+    [--workdir .cargorewind/verify-<dir>-<digest>]
     [--cache-dir <dir>] [--build-cache | --no-build-cache] [--rebuild]
     [--reruns <as recorded>] [--test-timeout <as recorded>]
     [--record t.json | --replay t.json] [--timeout 3600]
@@ -559,7 +578,7 @@ build     cargorewind/strsim-rs:edcbd61bae401cff (cache off: no build cache (rep
 run       base   exit   0  102 passed, 0 failed, 0 ignored
 run       before exit 101  102 passed, 2 failed, 0 ignored
 run       after  exit   0  104 passed, 0 failed, 0 ignored
-result    strsim-jaro-length-one: verified in 1 s
+result    strsim-jaro-length-one: verified in 0.7 s
 task      2/3 examples/semver/semver.bundle --fix d92a4d8
 mode      replay of examples/semver/transcript.json (no Docker)
 base      cc2cfed67c17 (first parent of fix)
@@ -578,17 +597,17 @@ build     cargorewind/semver:c0770c0638466449 (cache off: no build cache (replay
 run       base   exit   0  35 passed, 0 failed, 0 ignored
 run       before exit 101  34 passed, 1 failed, 0 ignored
 run       after  exit   0  35 passed, 0 failed, 0 ignored
-result    semver-empty-version-error: verified in 1.2 s
+result    semver-empty-version-error: verified in 1.1 s
 task      3/3 examples/strsim/strsim-rs.bundle --fix 605c81c9b9dfaeb8c26c92129fbd5d0f567e0fb8
-skip      same repository and fix commit as strsim-jaro-length-one
-result    strsim-again: duplicate in 0 s
+skip      same repository, fix, base and options as strsim-jaro-length-one
+result    strsim-again: duplicate in 0.1 s
 
 task                        fix           toolchain  lockfile      F2P  P2P  flaky  status     seconds  detail
-strsim-jaro-length-one      605c81c9b9df  1.39.0     generated     2    102  0      verified   1
-semver-empty-version-error  d92a4d8ff7d1  1.68.0     date-bounded  1    34   0      verified   1.2
-strsim-again                605c81c9b9df  -          -             -    -    -      duplicate  0        same repository and fix commit as strsim-jaro-length-one
+strsim-jaro-length-one      605c81c9b9df  1.39.0     generated     2    102  0      verified   0.7
+semver-empty-version-error  d92a4d8ff7d1  1.68.0     date-bounded  1    34   0      verified   1.1
+strsim-again                605c81c9b9df  -          -             -    -    -      duplicate  0.1      same repository, fix, base and options as strsim-jaro-length-one
 
-summary   3 task(s): 2 verified, 1 duplicate; 2.2 s
+summary   3 task(s): 2 verified, 1 duplicate; 1.9 s
 wrote     out/batch/ (summary.json, summary.md, one bundle per task)
 ```
 
@@ -600,7 +619,9 @@ The same recipes through Docker: `uv run cargorewind batch examples/batch.toml -
 --out out/batch-live --cache-dir <dir>` took 3 min 42 s wall on this Mac. Both images
 were already in Docker, so both builds were cache hits by recipe label
 (`found in Docker and indexed again`); the stage runs and the reruns (3 rounds of
-104 + 35 tests in 2 stages) ran for real, and so did the semver pin loop. Its `out/batch-live/summary.md`:
+104 + 35 tests in 2 stages) ran for real, and so did the semver pin loop. Its
+`out/batch-live/summary.md` (recorded before the duplicate detail also named the base
+and the options, so that row still reads "same repository and fix commit"):
 
 | task | fix | toolchain | lockfile | F2P | P2P | flaky | status | seconds | detail |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1133,35 +1154,35 @@ flowchart LR
 | `rewind.py` | the pipeline, the reruns and the `task.json` document |
 | `bundle.py` | schema 2 dataclasses, JSON Schema validation, `base.bundle`, the file manifest |
 | `verify.py` | consistency checks of a bundle and the rebuild from it alone; `verify.json` |
-| `batch.py` | recipes files, dedupe by repository and fix commit, the summary table and documents |
+| `batch.py` | recipes files, dedupe by repository, commits and options, bundle names, the summary table and documents |
 | `cli.py` | Typer CLI: `split`, `toolchain`, `lock`, `rewind`, `verify`, `batch`, `cache`, `doctor`, `version` |
 
 ## Measured
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 635 passed, 6 Docker tests deselected | `make cov` |
-| Line and branch coverage of `src/` | 98.83% (gate: 90%) | `make cov` |
-| Bundle schema, verify and batch tests (plus 3 CLI tests) | 55 passed | `uv run pytest tests/test_bundle.py tests/test_verify.py tests/test_batch.py` |
-| Offline batch of `examples/batch.toml` (2 replayed rewinds, 1 duplicate), fresh work directory | 1.88 s wall (median of 3) | `rm -rf .cargorewind out/batch && time make batch-demo` |
-| Offline verify of the demo bundle | 0.51 s wall (median of 3) | `time uv run cargorewind verify out/demo --replay examples/strsim/transcript.json` after `make demo` |
+| Tests (no Docker) | 651 passed, 6 Docker tests deselected | `make cov` |
+| Line and branch coverage of `src/` | 98.82% (gate: 90%) | `make cov` |
+| Bundle schema, verify and batch tests (plus 3 CLI tests) | 59 passed | `uv run pytest tests/test_bundle.py tests/test_verify.py tests/test_batch.py` |
+| Offline batch of `examples/batch.toml` (2 replayed rewinds, 1 duplicate), fresh work directory | 1.82 s wall (median of 3) | `rm -rf .cargorewind out/batch && time make batch-demo` |
+| Offline verify of the demo bundle | 0.50 s wall (median of 3) | `time uv run cargorewind verify out/demo --replay examples/strsim/transcript.json` after `make demo` |
 | Live batch of `examples/batch.toml` through Docker, images cached by label | 3 min 42 s wall: strsim-rs 24.5 s, semver 197.4 s (pin loop included), duplicate 0 s; 2 verified, 1 duplicate | `time uv run cargorewind batch examples/batch.toml --live --out out/batch-live --cache-dir <dir>` (numbers from `summary.md`) |
 | First live semver `d92a4d8` rewind (toolchain stage and `rust:1.68.0-slim` present, final image built) | 6 min 0 s wall; FAIL_TO_PASS 1, PASS_TO_PASS 34, 1 pin | `time uv run cargorewind rewind examples/semver/semver.bundle --fix d92a4d8 --registry --cache-dir <dir> --record <file>` |
 | libtest parser, target resolution, flip and rerun tests | 58 passed (9 recorded runs of 3 toolchains) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
 | Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
 | One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:edcbd61bae401cff sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
-| Recipe, golden Dockerfile, probe and build cache tests | 65 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
-| Dependency tests (semver, lockfile, index, pin loop, lock stage) | 100 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
+| Recipe, golden Dockerfile, probe and build cache tests | 75 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
+| Dependency tests (semver, lockfile, index, pin loop, lock stage) | 116 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
 | Toolchain and registry tests | 90 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
 | Lexer, scanner, layout and split tests (with the regression suite) | 159 passed | `uv run pytest tests/test_rustlex.py tests/test_rustscan.py tests/test_layout.py tests/test_patchsplit.py tests/test_splitreport.py tests/test_split_regressions.py` |
-| Offline split of the demo fix, fresh work directory | 0.40 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
+| Offline split of the demo fix, fresh work directory | 0.44 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
 | Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs; cache reuse by label; build stopped by the probe; verify from the bundle; batch of strsim-rs and semver), each rewind with 3 reruns | 6 passed, 5 min 50 s with a warm Docker cache (4 tests: 87 s before this slice) | `time make e2e` |
 | Live e2e on GitHub Actions (amd64: the six e2e tests, image pulls, pin loops, vendored build, reruns) | 7 min 58 s step time, 6 passed; the two-crate batch test took 3 min 50 s with the `rust:1.68.0-slim` pull, a cold semver build and two crates.io git index downloads (the four earlier tests: 3 min 0 s in run [36654184667](https://github.com/vipul21435/cargorewind/actions/runs/36654184667)) | CI run [36682266237](https://github.com/vipul21435/cargorewind/actions/runs/36682266237), step "Live end-to-end runs through Docker" |
 | strsim-rs environment rebuilt with `--rebuild` (`docker build --no-cache`, base image present) | 2.4 s build | `cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --cache-dir <dir> --rebuild` (see "Sanity probes and the build cache") |
-| Offline demo, fresh work directory | 0.70 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
-| Offline toolchain inference of the demo fix, fresh work directory | 0.21 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
-| Offline replay of the which-rs pin loop, fresh work directory | 0.25 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
+| Offline demo, fresh work directory | 0.82 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
+| Offline toolchain inference of the demo fix, fresh work directory | 0.24 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
+| Offline replay of the which-rs pin loop, fresh work directory | 0.30 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
 | First live pin loop on which-rs `e776ff0`, including the rust:1.73.0-slim pull | 2 min 4 s wall; 41 crates.io packages, 32 late, 16 pins in 4 rounds | `time uv run cargorewind lock <which-rs clone> e776ff0 --registry --cache-dir <dir>` |
 | Live vendored rewind of which-rs `e776ff0` (toolchain stage cached, final stage built) | 19.2 s wall; 27 crates vendored, 19 tests pass offline in all 3 runs | `time uv run cargorewind rewind <which-rs clone> --fix e776ff0 --vendor --registry --cache-dir <dir>` (before slice 5, no reruns) |
 | The same rewind with the image cached, 3 x 19 reruns in 2 stages | 10.9 s wall, 0 changed outcome | `time uv run cargorewind rewind examples/which-rs/which-rs.bundle --fix e776ff0 --vendor --index-dir examples/which-rs/index --cache-dir <dir>` |
@@ -1286,10 +1307,12 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   that wrote it, and a replayed verify is byte-identical to the replayed rewind.
 - **A batch task is what it points at, not how it is spelled.** Duplicates are found
   after resolving the fix commit, so a short SHA and a full SHA, or a bundle and a URL
-  of the same repository, run once. Only a verdict claims a task: after an error
+  of the same repository, run once when their base and options agree. Only a verdict claims a task: after an error
   (a missing transcript, a failed build) the next spelling of the same task runs.
-  Checkouts are keyed by the source (slug plus a digest), so two repositories with
-  the same name never fetch into one checkout. Errors of one task are recorded in the
+  A different explicit base, `vendor` or `image` is a different task, since it
+  changes the patches, the lists or the environment. Checkouts are keyed by the
+  source (slug plus a digest), and a checkout whose `origin` is another source is
+  cloned again, so two repositories with the same name never share commits. Errors of one task are recorded in the
   summary and the batch goes on; the exit code still reports them.
 
 ## Known issues
@@ -1379,7 +1402,10 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   and no resume, so an interrupted batch starts from the first task again (the build
   cache makes finished images cheap to reuse). Each task's seconds are wall time,
   including the clone. A named bundle directory that an earlier task with a verdict
-  holds is an error of the later task, not an overwrite.
+  holds (compared without case and Unicode normalization) is an error of the later
+  task, not an overwrite. Two unnamed tasks of one fix commit with different bases
+  both default to `<slug>-<fix12>`, so the second is that error until it gets a
+  `name`.
 - cargo before 1.70 fetches the whole crates.io git index instead of the sparse
   index. In the live e2e batch the semver task (rust 1.68.0) took 187.7 s with its
   image cached, against 20 s for strsim-rs; its pin loop's container spent most of
