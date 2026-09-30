@@ -17,6 +17,18 @@ from cargorewind.backend import (
     ReplayBackend,
     ReplayError,
 )
+from cargorewind.batch import (
+    BatchError,
+    BatchOptions,
+    BatchTask,
+    exit_code,
+    load_recipes,
+    run_batch,
+    summary_document,
+    summary_markdown,
+    summary_table,
+    with_defaults,
+)
 from cargorewind.buildcache import BuildCache, BuildCacheError
 from cargorewind.bundle import BundleError
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
@@ -493,6 +505,93 @@ def lock_command(
     typer.echo(f"wrote     {out}/ ({wrote})")
     if plan.bound is not None and not plan.bound.bounded:
         raise typer.Exit(code=EXIT_NOT_VERIFIED)
+
+
+@app.command("batch")
+def batch_command(
+    recipes: Annotated[Path, typer.Argument(help="A TOML file of [[task]] tables (repo, fix).")],
+    out: Annotated[
+        Path, typer.Option("--out", help="Directory for the bundles and the summary.")
+    ] = Path("out/batch"),
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", help="Checkouts, one per repository (default: .cargorewind/)."),
+    ] = None,
+    live: Annotated[
+        bool,
+        typer.Option("--live", help="Run every task through Docker, ignoring its replay file."),
+    ] = False,
+    timeout: Annotated[float, TIMEOUT_OPTION] = 3600.0,
+    registry: Annotated[bool, REGISTRY_OPTION] = False,
+    cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
+    build_cache: Annotated[
+        bool,
+        typer.Option(
+            "--build-cache/--no-build-cache",
+            help="Reuse images of identical recipes (off for tasks that replay a transcript).",
+        ),
+    ] = True,
+    rebuild: Annotated[
+        bool, typer.Option("--rebuild", help="Ignore cached images and build with --no-cache.")
+    ] = False,
+    reruns: Annotated[
+        int, typer.Option("--reruns", min=0, help="Rerun rounds for tasks that set none.")
+    ] = DEFAULT_RERUNS,
+    test_timeout: Annotated[
+        int,
+        typer.Option("--test-timeout", min=1, help="Seconds per rerun command (task default)."),
+    ] = DEFAULT_TEST_TIMEOUT,
+) -> None:
+    """Rewind every task of a recipes file, skip duplicates, and print a summary table.
+
+    Exit code 0 when every task is verified (or a duplicate), 2 when a task is not
+    verified, 1 when a task failed with an error or the recipes file is unusable.
+    """
+    try:
+        tasks = load_recipes(recipes)
+    except BatchError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if live:
+        tasks = with_defaults(tasks, replay=None)
+    cache = None
+    if build_cache:
+        cache = BuildCache(cache_dir or default_cache_dir(), SubprocessRunner())
+    options = BatchOptions(
+        out=out,
+        workdir=workdir or Path(".cargorewind"),
+        reruns=reruns,
+        test_timeout=test_timeout,
+        resolver=make_resolver(registry, cache_dir),
+        cache=cache,
+        rebuild=rebuild,
+        cache_dir=cache_dir,
+        failures=FAILURES,
+    )
+
+    def backend_for(task: BatchTask) -> Backend:
+        # A missing or unreadable transcript is an error of this task (ReplayError is
+        # one of FAILURES), not of the batch.
+        if task.replay is not None:
+            typer.echo(f"mode      replay of {task.replay} (no Docker)")
+            return ReplayBackend(task.replay)
+        return DockerBackend(SubprocessRunner(), timeout=timeout)
+
+    typer.echo(f"batch     {recipes}: {len(tasks)} task(s)")
+    results = run_batch(tasks, options, SubprocessRunner(), backend_for, typer.echo)
+    typer.echo("")
+    typer.echo(summary_table(results))
+    document = summary_document(recipes, results)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.json").write_text(json.dumps(document, indent=2) + "\n")
+    (out / "summary.md").write_text(summary_markdown(results))
+    tally = ", ".join(f"{n} {status}" for status, n in document["counts"].items() if n)
+    typer.echo("")
+    typer.echo(f"summary   {len(results)} task(s): {tally}; {document['seconds']:g} s")
+    typer.echo(f"wrote     {out}/ (summary.json, summary.md, one bundle per task)")
+    code = exit_code(results)
+    if code:
+        raise typer.Exit(code=code)
 
 
 cache_app = typer.Typer(

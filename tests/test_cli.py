@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from cargorewind import __version__, cli, registry
 from cargorewind.backend import ReplayBackend
+from cargorewind.batch import BatchResult
 from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.deps import Pin
 from cargorewind.flip import Flaky, compute_flip
@@ -606,3 +607,121 @@ def test_lock_demo_replays_the_recorded_pin_loop_offline(tmp_path: Path) -> None
     assert document["bounded"] is True and len(document["rounds"]) == 4
     assert document["cutoff"] == "2023-10-17T22:45:33+00:00"
     assert 'name = "home"\nversion = "0.5.5"' in (tmp_path / "lock" / "Cargo.lock").read_text()
+
+
+def _shown(path: Path) -> Path:
+    """How the batch spells a path below the working directory (relative to it)."""
+    return path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path
+
+
+def _batch_task(name: str, fix: str, replay: Path) -> str:
+    bundle = DEMO / "strsim-rs.bundle"
+    return f'[[task]]\nname = "{name}"\nrepo = "{bundle}"\nfix = "{fix}"\nreplay = "{replay}"\n'
+
+
+def test_batch_command_replays_dedupes_and_writes_the_summary(tmp_path: Path) -> None:
+    transcript = DEMO / "transcript.json"
+    recipes = tmp_path / "batch.toml"
+    recipes.write_text(
+        "\n".join(
+            [
+                "[defaults]\nreruns = 3\n",
+                _batch_task("gone", "605c81c9b9", tmp_path / "missing.json"),
+                _batch_task("strsim", "605c81c9b9", transcript),
+                _batch_task("strsim-again", "605c81c9b9dfaeb8c26c92129fbd5d0f567e0fb8", transcript),
+                _batch_task("strsim", "c4cdd9c35d", transcript),
+            ]
+        )
+    )
+    out = tmp_path / "out"
+    args = ["batch", str(recipes), "--out", str(out), "--workdir", str(tmp_path / "work")]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 1, result.output  # the missing transcript is an error
+    stdout = result.stdout
+    assert f"batch     {recipes}: 4 task(s)" in stdout
+    assert f"mode      replay of {_shown(transcript)} (no Docker)" in stdout
+    assert f"error     {tmp_path / 'missing.json'}: cannot read transcript" in stdout
+    assert "verdict       VERIFIED" not in stdout  # rewind's own summary is not printed
+    assert "skip      same repository and fix commit as strsim" in stdout
+    assert "error     bundle directory strsim is taken by task" in stdout
+    table = stdout.split("\n\n")[1].splitlines()
+    assert table[0].split() == [
+        "task",
+        "fix",
+        "toolchain",
+        "lockfile",
+        "F2P",
+        "P2P",
+        "flaky",
+        "status",
+        "seconds",
+        "detail",
+    ]
+    rows = [row.split() for row in table[1:]]
+    assert rows[0][:8] == ["gone", "605c81c9b9df", "-", "-", "-", "-", "-", "error"]
+    assert rows[1][:4] == ["strsim", "605c81c9b9df", "1.39.0", "generated"]
+    assert rows[1][4:8] == ["2", "102", "0", "verified"]
+    assert rows[2][:8] == ["strsim-again", "605c81c9b9df", "-", "-", "-", "-", "-", "duplicate"]
+    assert rows[3][:8] == ["strsim", "c4cdd9c35dfa", "-", "-", "-", "-", "-", "error"]
+    assert "summary   4 task(s): 1 verified, 2 error, 1 duplicate; " in stdout
+    assert f"wrote     {out}/ (summary.json, summary.md, one bundle per task)" in stdout
+
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["schema_version"] == 1 and summary["recipes"] == str(recipes)
+    assert summary["counts"] == {"verified": 1, "not-verified": 0, "error": 2, "duplicate": 1}
+    strsim = summary["results"][1]
+    assert (strsim["FAIL_TO_PASS"], strsim["PASS_TO_PASS"], strsim["lockfile"]) == (
+        2,
+        102,
+        "generated",
+    )
+    assert strsim["bundle"] == str(out / "strsim")
+    markdown = (out / "summary.md").read_text().splitlines()
+    assert markdown[0].startswith("| task | fix | toolchain | lockfile |")
+    assert markdown[3].startswith("| strsim | 605c81c9b9df | 1.39.0 | generated | 2 | 102 | 0 |")
+    assert json.loads((out / "strsim" / "task.json").read_text())["verified"] is True
+    assert not (out / "strsim-again").exists()
+
+    # Without the failing tasks the batch exits 0.
+    recipes.write_text(_batch_task("strsim", "605c81c9b9", transcript))
+    again = runner.invoke(cli.app, [*args, "--out", str(tmp_path / "out2")])
+    assert again.exit_code == 0, again.output
+    assert "summary   1 task(s): 1 verified; " in again.stdout
+
+
+def test_batch_command_options_and_exit_codes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipes = tmp_path / "batch.toml"
+    recipes.write_text(_batch_task("strsim", "605c81c9b9", DEMO / "transcript.json"))
+    seen: list[Any] = []
+
+    def fake_run_batch(tasks: Any, options: Any, runner_: Any, backends: Any, log: Any) -> Any:
+        seen.append((tasks, options, backends))
+        return [BatchResult(tasks[0], "not-verified", detail="no FAIL_TO_PASS test")]
+
+    monkeypatch.setattr(cli, "run_batch", fake_run_batch)
+    monkeypatch.setattr(cli, "DockerBackend", lambda runner, timeout: ("docker", timeout))
+    out = tmp_path / "out"
+    base = ["batch", str(recipes), "--out", str(out), "--cache-dir", str(tmp_path / "c")]
+    result = runner.invoke(
+        cli.app, [*base, "--reruns", "1", "--test-timeout", "9", "--live", "--timeout", "60"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "summary   1 task(s): 1 not-verified; 0 s" in result.stdout
+    tasks, options, backends = seen[0]
+    assert tasks[0].replay is None  # --live drops the transcript
+    assert backends(tasks[0]) == ("docker", 60.0)
+    assert (options.reruns, options.test_timeout, options.workdir) == (1, 9, Path(".cargorewind"))
+    assert isinstance(options.cache, BuildCache) and options.cache.directory == tmp_path / "c"
+    assert options.failures == cli.FAILURES
+    runner.invoke(cli.app, [*base, "--no-build-cache", "--rebuild"])
+    tasks, options, backends = seen[1]
+    assert options.cache is None and options.rebuild
+    assert tasks[0].replay == _shown(DEMO / "transcript.json")
+    assert isinstance(backends(tasks[0]), ReplayBackend)
+
+    recipes.write_text("[[task]]\nrepo = 'x'\n")
+    bad = runner.invoke(cli.app, base)
+    assert bad.exit_code == 1 and len(seen) == 2
+    assert "task 1: fix must be a non-empty string" in bad.output

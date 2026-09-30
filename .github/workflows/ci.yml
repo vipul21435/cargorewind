@@ -47,6 +47,8 @@ jobs:
         run: make demo
       - name: Offline verify of the demo bundle (replayed Docker runs)
         run: make verify-demo
+      - name: Offline batch of the recorded tasks (deduplicated, summary table)
+        run: make batch-demo
       - name: Offline toolchain inference demo
         run: make toolchain-demo
       - name: Offline date-bounded lockfile demo (replayed pin loop)

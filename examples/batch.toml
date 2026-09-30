@@ -1,0 +1,19 @@
+# Recorded rewinds, replayed offline: `make batch-demo` runs
+# `cargorewind batch examples/batch.toml`. Paths are relative to this file;
+# `cargorewind batch --live` ignores the `replay` lines and runs every task through Docker.
+
+[defaults]
+reruns = 3
+
+[[task]]
+name = "strsim-jaro-length-one"
+repo = "strsim/strsim-rs.bundle"
+fix = "605c81c9b9"
+replay = "strsim/transcript.json"
+
+# The same task again, spelled with the full SHA and another name: deduplicated.
+[[task]]
+name = "strsim-again"
+repo = "strsim/strsim-rs.bundle"
+fix = "605c81c9b9dfaeb8c26c92129fbd5d0f567e0fb8"
+replay = "strsim/transcript.json"
