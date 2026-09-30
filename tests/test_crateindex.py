@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from cargorewind import crateindex
 from cargorewind.crateindex import (
     USER_AGENT,
     CrateIndexError,
@@ -156,3 +158,55 @@ def test_sparse_index_errors(tmp_path: Path, status: int, message: str) -> None:
         SparseIndex(_http(status=status), tmp_path).versions("either")
     with pytest.raises(CrateIndexError, match="cannot reach"):
         SparseIndex(FakeHttp({}), tmp_path).versions("either")
+
+
+def test_parallel_stores_of_one_crate_never_lose_a_temporary_file(tmp_path: Path) -> None:
+    # Regression: every store of a crate used the same "<crate>.tmp" path, so a run
+    # sharing the cache could move another run's half-written file into place and the
+    # other run's replace() then failed with FileNotFoundError.
+    body = (INDEX.parents[2] / "examples" / "which-rs" / "index" / "li" / "bc" / "libc").read_text()
+    index = SparseIndex(FakeHttp({}), tmp_path)
+    errors: list[BaseException] = []
+    start = threading.Barrier(4)
+
+    def store() -> None:
+        start.wait()
+        for _ in range(150):
+            try:
+                index._store("libc", body)
+            except OSError as exc:  # pragma: no cover - only on the regression
+                errors.append(exc)
+
+    threads = [threading.Thread(target=store) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == [] and index.notes == []
+    folder = tmp_path / "crates-index" / "li" / "bc"
+    assert sorted(p.name for p in folder.iterdir()) == ["libc.json"]
+    assert json.loads((folder / "libc.json").read_text())["body"] == body
+
+
+def test_an_unwritable_index_cache_keeps_the_answer(tmp_path: Path) -> None:
+    body = (INDEX / "ei" / "th" / "either").read_bytes()
+    blocked = tmp_path / "cache"
+    blocked.write_text("a file where the cache directory should be")
+    index = SparseIndex(_http(body), blocked)
+    assert len(index.versions("either")) > 30
+    assert len(index.versions("either")) > 30  # refetched (nothing was cached), noted once
+    (note,) = index.notes
+    assert note.startswith(f"crates.io index cache {blocked} is not writable")
+
+
+def test_a_failed_replace_removes_its_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(src: str, dst: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(crateindex.os, "replace", refuse)
+    index = SparseIndex(FakeHttp({}), tmp_path)
+    index._store("either", "{}")
+    assert list((tmp_path / "crates-index" / "ei" / "th").iterdir()) == []
+    assert index.notes == [f"crates.io index cache {tmp_path} is not writable (Permission denied)"]

@@ -14,6 +14,8 @@ the commit being rebuilt.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -156,6 +158,7 @@ class SparseIndex:
         self.url = url.rstrip("/")
         self.clock = clock
         self.fetched: list[str] = []  # crates fetched from the network in this run
+        self.notes: list[str] = []  # cache files that could not be written
 
     def _cache_file(self, name: str) -> Path:
         return self.cache_dir / "crates-index" / f"{index_path(name)}.json"
@@ -176,13 +179,25 @@ class SparseIndex:
         return body
 
     def _store(self, name: str, body: str) -> None:
+        """Write the cache file atomically. Each write goes through a temporary file of
+        its own, so runs that share the cache never move each other's half-written
+        files; a cache that cannot be written is noted and the answer is kept."""
         path = self._cache_file(name)
-        path.parent.mkdir(parents=True, exist_ok=True)
         stamp = self.clock().isoformat().replace("+00:00", "Z")
         document = {"schema": CACHE_SCHEMA, "fetched_at": stamp, "body": body}
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(document) + "\n")
-        tmp.replace(path)
+        tmp: str | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(json.dumps(document) + "\n")
+            os.replace(tmp, path)
+        except OSError as exc:
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
+            note = f"crates.io index cache {self.cache_dir} is not writable ({exc.strerror})"
+            if note not in self.notes:
+                self.notes.append(note)
 
     def versions(self, name: str) -> list[IndexVersion]:
         body = self._cached(name)

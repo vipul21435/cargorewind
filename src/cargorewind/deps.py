@@ -29,7 +29,13 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from cargorewind.backend import Session
-from cargorewind.crateindex import CrateIndex, CrateIndexError, IndexVersion, candidates
+from cargorewind.crateindex import (
+    CrateIndex,
+    CrateIndexError,
+    IndexVersion,
+    SparseIndex,
+    candidates,
+)
 from cargorewind.layout import SourceTree
 from cargorewind.lockfile import LockedPackage, Lockfile, parse_lockfile
 from cargorewind.semver import SemverError, Version, VersionReq
@@ -448,6 +454,8 @@ def bound_lockfile(
                 planner.failed.setdefault((pin.name, pin.from_version), set()).add(pin.to_version)
         lock = parse_lockfile(text)
     result.lockfile = text
+    if isinstance(index, SparseIndex):
+        notes.extend(index.notes)
     for package in lock.registry_packages():
         if not planner.is_late(package):
             continue

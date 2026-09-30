@@ -223,6 +223,23 @@ def test_rewind_registry_options_reach_the_resolver(
     assert seen == [(True, tmp_path / "cache")]
 
 
+def test_rewind_cache_dir_reaches_the_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: --cache-dir reached the digest resolver but not the crates.io index.
+    captured: list[Any] = []
+
+    def fake_rewind(options: Any, *args: Any) -> Any:
+        captured.append(options)
+        raise cli.GitError("stop here")
+
+    monkeypatch.setattr(cli, "rewind", fake_rewind)
+    args = _demo_args(tmp_path, "--replay", str(DEMO / "transcript.json"))
+    result = runner.invoke(cli.app, [*args, "--cache-dir", str(tmp_path / "c")])
+    assert result.exit_code == 1 and "stop here" in result.output
+    assert captured[0].cache_dir == tmp_path / "c"
+
+
 def test_toolchain_registry_lookup_with_an_unwritable_cache_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

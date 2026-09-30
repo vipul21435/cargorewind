@@ -8,7 +8,7 @@ import pytest
 
 from cargorewind import deps
 from cargorewind.backend import RunResult
-from cargorewind.crateindex import CrateIndex, DirectoryIndex, candidates
+from cargorewind.crateindex import CrateIndex, DirectoryIndex, SparseIndex, candidates
 from cargorewind.deps import (
     LOCK_BEGIN,
     LOCK_END,
@@ -24,7 +24,9 @@ from cargorewind.deps import (
 )
 from cargorewind.layout import MemoryTree
 from cargorewind.lockfile import CRATES_IO_SOURCES, parse_lockfile
+from cargorewind.registry import HttpResponse
 from cargorewind.semver import Version, VersionReq
+from tests.test_registry import FakeHttp
 
 INDEX = DirectoryIndex(Path(__file__).parent / "fixtures" / "crates-index")
 REGISTRY = sorted(CRATES_IO_SOURCES)[0]
@@ -455,6 +457,30 @@ def test_pin_loop_notes_unknown_crates_and_bad_requirements() -> None:
     assert any("ghost: not in the recorded index" in n for n in result.notes)
     assert "demo: requirement 'latest' on home ignored" in result.notes
     assert {u.name for u in result.unbounded} == {"ghost", "home"}
+
+
+def test_pin_loop_reports_an_unwritable_index_cache(tmp_path: Path) -> None:
+    lock = (
+        'version = 3\n[[package]]\nname = "demo"\nversion = "0.1.0"\n'
+        'dependencies = ["home 0.5.9"]\n'
+        f'[[package]]\nname = "home"\nversion = "0.5.9"\nsource = "{REGISTRY}"\n'
+    )
+
+    class Fixed:
+        def generate(self) -> str:
+            return lock
+
+        def pin(self, pins: list[Pin]) -> tuple[str, dict[str, str]]:  # pragma: no cover
+            raise AssertionError("nothing is late")
+
+    body = (Path(__file__).parent / "fixtures" / "crates-index" / "ho" / "me" / "home").read_bytes()
+    http = FakeHttp({("GET", "ho/me/home"): HttpResponse(200, {}, body)})
+    blocked = tmp_path / "cache"
+    blocked.write_text("not a directory")
+    index = SparseIndex(http, blocked)
+    result = bound_lockfile(Fixed(), index, when("2024-03-01T00:00:00"), HOME_REQS, print)
+    assert result.bounded
+    assert result.notes == [f"crates.io index cache {blocked} is not writable (Not a directory)"]
 
 
 # cargo through a container session

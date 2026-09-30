@@ -53,6 +53,7 @@ class RewindOptions:
     resolver: ImageResolver | None = None  # default: the offline digest table
     vendor: bool = False
     index: CrateIndex | None = None  # default: the live sparse index behind the cache
+    cache_dir: Path | None = None  # index cache (default: $CARGOREWIND_CACHE_DIR, ~/.cache)
     cache: BuildCache | None = None  # None: always build (Docker's layer cache still applies)
     rebuild: bool = False  # skip the cache lookup and build with --no-cache
 
@@ -300,7 +301,7 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     # A build context of its own: parallel runs of one repository share the work directory.
     with build_context(git, base, workdir, first_dockerfile(recipe)) as context:
         if plan.strategy is LockStrategy.BOUNDED:
-            index = options.index or default_index(commits.commit_time)
+            index = options.index or default_index(commits.commit_time, options.cache_dir)
             bound = run_pin_loop(plan, backend, context, index, log)
             recipe = replace(recipe, lockfile_sha256=sha256_hex(bound.lockfile))
         dockerfile = render_dockerfile(recipe)

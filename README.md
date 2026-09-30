@@ -120,8 +120,11 @@ run.
   `cargorewind lock` exits 2.
 - **crates.io metadata from the sparse index.** One request per crate to
   `https://index.crates.io` gives every version's publish time (`pubtime`), yanked
-  flag, `rust_version` and dependencies. Answers are cached as JSON (`--cache-dir`)
-  and refetched only when they are older than the commit. `--index-dir` reads
+  flag, `rust_version` and dependencies. Answers are cached as JSON (`--cache-dir`,
+  for `lock` and `rewind`) and refetched only when they are older than the commit.
+  Each cache write goes through a temporary file of its own, so parallel runs can
+  share the cache; a cache that cannot be written is noted in `lock.json`, and the
+  fetched answer is still used. `--index-dir` reads
   recorded files in the same layout instead, which the tests and the offline demo use.
   Requirements follow cargo's semver rules: caret, tilde, wildcards, `=`, `>`, `>=`,
   `<`, `<=`, comma-separated bounds and the pre-release rule.

@@ -11,6 +11,7 @@ import pytest
 from cargorewind import rewind as rewind_module
 from cargorewind.backend import BuildResult, Overlay, ReplayBackend, RunResult
 from cargorewind.buildcache import BuildCache
+from cargorewind.crateindex import DirectoryIndex
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
 from cargorewind.dockerfile import PROBE_MARKER
 from cargorewind.gitops import GitError
@@ -553,6 +554,27 @@ def test_rewind_bounds_a_missing_lockfile_by_the_commit_date(
     assert "cargo vendor --locked /home/rewind/vendor" in dockerfile
     assert any(line.startswith("lockfile  none: 1 crates.io requirement(s)") for line in lines)
     assert any("9 pin(s) in 3 round(s); every crates.io package is bounded" in ln for ln in lines)
+
+
+def test_rewind_reads_the_index_through_the_given_cache_dir(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: rewind built the live index without --cache-dir, so index files always
+    # went to the home cache even when the run was pointed at another directory.
+    repo = make_repo("origin")
+    _, fix = _home_crate(repo)
+    seen: list[tuple[object, Path | None]] = []
+
+    def spy(cutoff: object, cache_dir: Path | None = None) -> DirectoryIndex:
+        seen.append((cutoff, cache_dir))
+        return INDEX
+
+    monkeypatch.setattr(rewind_module, "default_index", spy)
+    session = CargoModelSession(FakeCargo(INDEX, {"demo": [("home", "0.5.4")]}))
+    cache = tmp_path / "private-cache"
+    options = RewindOptions(str(repo.path), fix, tmp_path / "out", tmp_path / "w", cache_dir=cache)
+    rewind(options, SubprocessRunner(), ScriptedBackend(PASSING, session), lambda _: None)
+    assert [c for _, c in seen] == [cache]
 
 
 def test_rewind_refuses_to_vendor_with_a_cargo_that_has_no_vendor(

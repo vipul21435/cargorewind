@@ -334,6 +334,12 @@ green, pushed, and the README describes it with real output.
   or git dependency.
 - `BoundLock.pins()` drops a pin only when it failed in its own round, so the summary
   counts a pin that cargo accepted on retry.
+- `rewind --cache-dir` reaches the crates.io index (`RewindOptions.cache_dir`), as it
+  already did for `lock`.
+- Index cache files are written through `tempfile.mkstemp` in the target directory and
+  `os.replace`, so runs that share the cache never move each other's temporary files.
+  A cache that cannot be written (read-only home, a file in its place) is noted once in
+  `lock.json` and the fetched answer is used, like the digest cache.
 
 ## Core (deliverable)
 

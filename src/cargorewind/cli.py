@@ -309,6 +309,7 @@ def rewind_command(
         resolver=make_resolver(registry, cache_dir),
         vendor=vendor,
         index=_index(index_dir),
+        cache_dir=cache_dir,
         cache=cache,
         rebuild=rebuild,
     )
