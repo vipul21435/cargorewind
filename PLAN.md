@@ -379,7 +379,7 @@ green, pushed, and the README describes it with real output.
   rerun leaves both lists with the reason; the flip stays verified when a FAIL_TO_PASS
   test remains. The reruns are recorded and replayed like the stage runs
   (`runs["rerun-<stage>"]`), so the strsim-rs transcript was re-recorded live (21 s
-  including 2 x 3 x 104 reruns).
+  including 2 x 3 x 104 reruns). The CI e2e step went from 51 s to 3 min 0 s.
 - The JSON format is requested only for nightly channels installed with rustup
   (`-- -Z unstable-options --format json` on the stage and rerun commands; the recipe
   hash changes for those recipes only). The JSON fixtures were recorded on stable

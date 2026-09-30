@@ -920,7 +920,7 @@ flowchart LR
 | Offline split of the demo fix, fresh work directory | 0.40 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
 | Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs; cache reuse by label; build stopped by the probe), each rewind with 3 reruns | 4 passed, 87 s with a warm Docker cache (19.7 s before the reruns) | `time make e2e` |
-| Live e2e on GitHub Actions (amd64: the four e2e tests, image pulls, pin loop, vendored build) | 51 s step time | CI run [36650143288](https://github.com/vipul21435/cargorewind/actions/runs/36650143288), step "Live end-to-end runs through Docker" |
+| Live e2e on GitHub Actions (amd64: the four e2e tests, image pulls, pin loop, vendored build, reruns) | 3 min 0 s step time (51 s before the reruns) | CI run [36654184667](https://github.com/vipul21435/cargorewind/actions/runs/36654184667), step "Live end-to-end runs through Docker" |
 | strsim-rs environment rebuilt with `--rebuild` (`docker build --no-cache`, base image present) | 2.4 s build | `cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --cache-dir <dir> --rebuild` (see "Sanity probes and the build cache") |
 | Offline demo, fresh work directory | 0.70 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
 | Offline toolchain inference of the demo fix, fresh work directory | 0.21 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
