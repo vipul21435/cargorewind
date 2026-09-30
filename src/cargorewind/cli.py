@@ -34,7 +34,7 @@ from cargorewind.bundle import BundleError
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
 from cargorewind.deps import LockError
 from cargorewind.dockerfile import LockStrategy, RecipeError
-from cargorewind.gitops import GitError, GitTree, open_checkout, repo_slug
+from cargorewind.gitops import GitError, GitTree, default_workdir, open_checkout
 from cargorewind.lockfile import LockfileError
 from cargorewind.lockstage import (
     build_context,
@@ -227,12 +227,14 @@ def split_command(
     ] = Path("out/split"),
     workdir: Annotated[
         Path | None,
-        typer.Option("--workdir", help="Checkout directory (default: .cargorewind/)."),
+        typer.Option(
+            "--workdir", help="Checkout directory (default: .cargorewind/<name>-<digest>)."
+        ),
     ] = None,
 ) -> None:
     """Split a fix commit into test.patch and fix.patch by Cargo layout role (no Docker)."""
     try:
-        workdir = workdir or Path(".cargorewind") / repo_slug(source)
+        workdir = workdir or default_workdir(source)
         git = open_checkout(SubprocessRunner(), source, workdir)
         commits = resolve_commits(git, fix, base, typer.echo)
         _, checks = split_commit(commits, source, out, typer.echo, verbose=True)
@@ -262,14 +264,16 @@ def toolchain_command(
     ] = None,
     workdir: Annotated[
         Path | None,
-        typer.Option("--workdir", help="Checkout directory (default: .cargorewind/)."),
+        typer.Option(
+            "--workdir", help="Checkout directory (default: .cargorewind/<name>-<digest>)."
+        ),
     ] = None,
     registry: Annotated[bool, REGISTRY_OPTION] = False,
     cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
 ) -> None:
     """Infer the toolchain and base image for a fix commit and print every decision."""
     try:
-        workdir = workdir or Path(".cargorewind") / repo_slug(source)
+        workdir = workdir or default_workdir(source)
         git = open_checkout(SubprocessRunner(), source, workdir)
         commits = resolve_commits(git, sha, base, typer.echo)
         toolchain = infer_toolchain(commits)
@@ -301,7 +305,9 @@ def rewind_command(
     ),
     workdir: Annotated[
         Path | None,
-        typer.Option("--workdir", help="Checkout and build context (default: .cargorewind/)."),
+        typer.Option(
+            "--workdir", help="Checkout and build context (default: .cargorewind/<name>-<digest>)."
+        ),
     ] = None,
     image: Annotated[
         str | None,
@@ -364,7 +370,7 @@ def rewind_command(
         source=source,
         fix=fix,
         out=out,
-        workdir=workdir or Path(".cargorewind") / repo_slug(source),
+        workdir=workdir or default_workdir(source),
         base=base,
         image=image,
         resolver=make_resolver(registry, cache_dir),
@@ -397,7 +403,9 @@ def verify_command(
     ] = None,
     workdir: Annotated[
         Path | None,
-        typer.Option("--workdir", help="Checkout and build context (default: .cargorewind/)."),
+        typer.Option(
+            "--workdir", help="Checkout and build context (default: .cargorewind/<name>-<digest>)."
+        ),
     ] = None,
     record: Annotated[Path | None, RECORD_OPTION] = None,
     replay: Annotated[Path | None, REPLAY_OPTION] = None,
@@ -434,7 +442,7 @@ def verify_command(
     options = VerifyOptions(
         bundle=bundle,
         out=out,
-        workdir=workdir or Path(".cargorewind") / f"verify-{repo_slug(str(bundle.resolve()))}",
+        workdir=workdir or default_workdir(str(bundle), prefix="verify-"),
         cache=cache,
         rebuild=rebuild,
         reruns=reruns,
@@ -467,7 +475,9 @@ def lock_command(
     ] = Path("out/lock"),
     workdir: Annotated[
         Path | None,
-        typer.Option("--workdir", help="Checkout and build context (default: .cargorewind/)."),
+        typer.Option(
+            "--workdir", help="Checkout and build context (default: .cargorewind/<name>-<digest>)."
+        ),
     ] = None,
     registry: Annotated[bool, REGISTRY_OPTION] = False,
     cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
@@ -479,7 +489,7 @@ def lock_command(
     """Check the committed Cargo.lock, or write one bounded by the commit date (Docker)."""
     backend = _backend(record, replay, timeout)
     try:
-        workdir = workdir or Path(".cargorewind") / repo_slug(source)
+        workdir = workdir or default_workdir(source)
         git = open_checkout(SubprocessRunner(), source, workdir)
         commits = resolve_commits(git, sha, base, typer.echo)
         toolchain = infer_toolchain(commits)

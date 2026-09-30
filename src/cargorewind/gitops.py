@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import posixpath
 import re
@@ -29,6 +30,33 @@ def repo_slug(source: str) -> str:
     name = _SLUG_STRIP.sub("", name.lower())
     name = _SLUG_BAD.sub("-", name).strip("-._")
     return name or "repo"
+
+
+def is_remote(value: str) -> bool:
+    """True when git would treat ``value`` as a URL rather than a local path.
+
+    That is a ``scheme://`` URL or git's scp-like ``[user@]host:path`` form: a colon
+    before the first slash (``gh-work:owner/repo.git``, ``deploy@host:team/r.git``).
+    Like ``git clone``, a value that names an existing local path stays a path.
+    """
+    if Path(value).exists():
+        return False
+    if "://" in value:
+        return True
+    colon = value.find(":")
+    return colon > 0 and "/" not in value[:colon]
+
+
+def source_identity(source: str) -> str:
+    """What identifies a repository source: a URL as it is, a local path resolved."""
+    return source if is_remote(source) else os.path.realpath(source)
+
+
+def default_workdir(source: str, prefix: str = "") -> Path:
+    """``.cargorewind/<prefix><slug>-<8 hex>``: the digest of the source's identity keeps
+    two sources that share a name (forks, two ``crate.bundle`` files) apart."""
+    digest = hashlib.sha256(source_identity(source).encode()).hexdigest()[:8]
+    return Path(".cargorewind") / f"{prefix}{repo_slug(source)}-{digest}"
 
 
 def lock_path(repo: Path) -> Path:
@@ -326,13 +354,16 @@ class GitTree:
 def open_checkout(runner: Runner, source: str, workdir: Path) -> Git:
     """Clone ``source`` (URL, path or bundle) into ``workdir/repo``, or refresh it.
 
-    The clone or fetch holds the checkout lock, so parallel runs never clone into the
-    same directory or update its refs at the same time.
+    An existing checkout is only fetched when its ``origin`` is ``source``; a checkout of
+    another source (two sources that share a work directory) is replaced by a fresh
+    clone, so a run never reads commits of a repository it was not given. The clone or
+    fetch holds the checkout lock, so parallel runs never clone into the same directory
+    or update its refs at the same time.
     """
     repo_dir = workdir / "repo"
     git = Git(runner, repo_dir)
     with git.lock:
-        if (repo_dir / ".git").is_dir():
+        if (repo_dir / ".git").is_dir() and _origin_is(runner, repo_dir, source):
             checked(runner.run(["git", "-C", str(repo_dir), "fetch", "--quiet", "origin"]))
         else:
             if repo_dir.exists():
@@ -340,3 +371,9 @@ def open_checkout(runner: Runner, source: str, workdir: Path) -> Git:
             workdir.mkdir(parents=True, exist_ok=True)
             checked(runner.run(["git", "clone", "--quiet", source, str(repo_dir)]))
     return git
+
+
+def _origin_is(runner: Runner, repo_dir: Path, source: str) -> bool:
+    result = runner.run(["git", "-C", str(repo_dir), "config", "--get", "remote.origin.url"])
+    url = result.stdout.strip()
+    return result.ok and bool(url) and source_identity(url) == source_identity(source)

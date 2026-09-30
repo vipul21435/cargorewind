@@ -14,6 +14,7 @@ from cargorewind.batch import BatchResult
 from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.deps import Pin
 from cargorewind.flip import Flaky, compute_flip
+from cargorewind.gitops import default_workdir
 from cargorewind.libtest import Status
 from cargorewind.probes import ProbeReport
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
@@ -253,7 +254,12 @@ def test_verify_command_replays_the_demo_bundle(
     assert isinstance(options.cache, BuildCache)
     assert options.cache.directory == tmp_path / "c"
     assert options.out == bundle / "verify" and options.reruns is None
-    assert options.workdir == Path(".cargorewind") / f"verify-{bundle.name}"
+    assert options.workdir == default_workdir(str(bundle), prefix="verify-")
+    assert options.workdir.name.startswith(f"verify-{bundle.name}-")
+    # Two bundles whose directories share a name get their own checkouts.
+    twin = tmp_path / "elsewhere" / bundle.name
+    twin.mkdir(parents=True)
+    assert default_workdir(str(twin), prefix="verify-") != options.workdir
     off = runner.invoke(cli.app, ["verify", str(bundle), "--no-build-cache", "--rebuild"])
     assert off.exit_code == 1 and captured[1].cache is None and captured[1].rebuild
 

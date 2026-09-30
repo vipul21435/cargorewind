@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -7,7 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from cargorewind.gitops import CheckoutLock, GitError, GitTree, open_checkout, repo_slug
+from cargorewind.gitops import (
+    CheckoutLock,
+    GitError,
+    GitTree,
+    default_workdir,
+    is_remote,
+    open_checkout,
+    repo_slug,
+    source_identity,
+)
 from cargorewind.patchsplit import parse_diff, split_diff
 from cargorewind.rewind import build_overlays
 from cargorewind.runner import CommandError, SubprocessRunner
@@ -77,6 +87,65 @@ def test_stale_non_repo_directory_is_replaced(
     (stale / "junk").write_text("x")
     git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
     assert git.rev_parse(fix) == fix
+
+
+def test_a_checkout_of_another_source_is_cloned_again(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two sources that share a work directory: the second must not fetch the first
+    one's origin (it would not find its commit), and a moved first source must not
+    break the second."""
+    first, second = make_repo("a/crate"), make_repo("b/crate")
+    _two_commits(first)
+    other = second.commit("other", {"z.txt": "z\n"}, "2021-01-01T00:00:00+00:00")
+    work = tmp_path / "work"
+    open_checkout(SubprocessRunner(), str(first.path), work)
+    git = open_checkout(SubprocessRunner(), str(second.path), work)
+    assert git.rev_parse(other) == other
+    assert git.show_file(other, "a.txt") is None  # a fresh clone, not a merged fetch
+    # The same source spelled another way (relative, with ..) is still the same origin.
+    monkeypatch.chdir(tmp_path)
+    marker = work / "repo" / ".git" / "kept"
+    marker.write_text("x")
+    open_checkout(SubprocessRunner(), os.path.join("a", "..", "b", "crate"), work)
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("value", "remote"),
+    [
+        ("https://github.com/o/r", True),
+        ("git@github.com:o/r.git", True),
+        ("gh-work:owner/repo.git", True),
+        ("deploy@git.example.org:team/repo.git", True),
+        ("host:repo", True),
+        ("examples/strsim/strsim-rs.bundle", False),
+        ("../crates/a:b.bundle", False),  # a slash before the colon: a path
+        ("/abs/path", False),
+        (":starts-with-colon", False),
+    ],
+)
+def test_is_remote_follows_the_git_url_rule(value: str, remote: bool) -> None:
+    assert is_remote(value) is remote
+
+
+def test_an_existing_path_with_a_colon_stays_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("odd:name").mkdir()
+    assert not is_remote("odd:name")
+    assert source_identity("odd:name") == os.path.realpath(tmp_path / "odd:name")
+
+
+def test_default_workdirs_keep_sources_with_one_name_apart(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = default_workdir(str(tmp_path / "a" / "crate.bundle"))
+    b = default_workdir(str(tmp_path / "b" / "crate.bundle"))
+    assert a != b and a.parent == Path(".cargorewind") and a.name.startswith("crate-")
+    url = default_workdir("https://github.com/o/crate", prefix="verify-")
+    assert url.name.startswith("verify-crate-") and len(url.name) == len("verify-crate-") + 8
 
 
 def test_clone_failure_raises(tmp_path: Path) -> None:
