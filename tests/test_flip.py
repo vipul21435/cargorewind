@@ -89,7 +89,7 @@ def test_no_flip_is_not_verified() -> None:
     assert flip.fail_to_pass == [] and not flip.verified
 
 
-def assign_ids_qualify_names_that_two_targets_share() -> None:
+def test_assign_ids_qualify_names_that_two_targets_share() -> None:
     keys = [(LIB, "shared_name"), (IT, "shared_name"), (LIB, "tests::only")]
     assert assign_ids(keys) == {
         (LIB, "shared_name"): "shared_name [lib demo]",
