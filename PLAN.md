@@ -268,6 +268,54 @@ green, pushed, and the README describes it with real output.
 - A digest cache that cannot be written (read-only directory, a file in its place) is
   reported in the image reason; the registry answer is kept.
 
+### Decisions made while building slice 4 (2026-09-30)
+
+- The `Recipe` stays in `dockerfile.py` and gains the lockfile sha256, the probe words
+  and the warm and test commands (empty means the default for the vendoring mode).
+  It validates every field with `fullmatch` in `__post_init__` (`RecipeError`), so
+  the Dockerfile is safe by construction and not only because its inputs were
+  checked upstream. `recipe.json` is the recipe plus its hash; `Recipe.from_dict`
+  reads it back (for the planned `verify`).
+- Recipe hash: sha256 of `json.dumps(as_dict(), sort_keys=True, separators=(",",
+  ":"), ensure_ascii=True)`, with a `schema` field. The source URL is not part of it
+  (the base commit identifies the content), so a bundle and a URL of the same
+  repository share images. Tag: `cargorewind/<repo slug>:<first 16 hex digits>`; the
+  full hash is the `cargorewind.recipe` label on the last line of the Dockerfile, so it
+  never invalidates Docker's layer cache.
+- A date-bounded recipe renders its toolchain stage on its own (no probe, no label)
+  for the pin loop, then the whole file once the lockfile's sha256 is known. Both
+  demo transcripts were re-recorded live (the strsim-rs Dockerfile gained the probe
+  and the label; the which-rs stage file lost the final stage); the pin loop's output
+  was identical.
+- Probe identifiers: `fn`, `struct`, `enum`, `trait`, `const` (only `const NAME:`
+  outside generic parameters) and `macro_rules!` names defined on added lines, found
+  with the Rust lexer on the file after its patch. A name is kept only if it occurs
+  nowhere at base as a whole word (one `git grep -I -o -w -F` call over `*.rs`), which
+  makes the in-container `grep -w` exact. A name added by both patches belongs to the
+  test patch. At most 16 probes, the fix's names first. The probe line numbers refer
+  to the file after the probe's own patch.
+- Where each check runs: the image build greps for absence (a `RUN grep ... ; test
+  $? -eq 1` step after the checkout copy, in the final stage); the before and after
+  stage scripts grep for presence before cargo and exit 97 with a marker line; the
+  host checks definitions in the exact overlay files. A failed host check stops
+  `rewind` before Docker (exit 1, `ProbeError`); a failed stage probe makes the task
+  unverified (exit 2). The `git apply --check` results of the split are part of
+  `probes.json`.
+- Transcripts record the sha256 of each stage script, so a replay with different
+  probe words is refused; transcripts without it (older ones) still replay.
+- Build cache: `build-index.json` in the cache directory (`--cache-dir`, the same one
+  the registry and index caches use). A hit needs the image's recipe label to match;
+  the indexed tag is tried before the requested one. One `flock` per recipe
+  (`build-locks/<hash>.lock`) from lookup to the end of the build, polled with
+  `LOCK_NB` up to a timeout (2 h by default); the index has its own short lock and is
+  replaced atomically. An unusable cache directory or index never fails a build.
+- `--rebuild` means `docker build --no-cache` (with Docker's layer cache the rebuild
+  would otherwise be a no-op), then `docker image prune -f --filter
+  label=project=cargorewind --filter dangling=true`. The cache is off for `--record`
+  (a transcript must hold a real build) and `--replay`, and with `--no-build-cache`.
+- `cargorewind cache list` and `cache prune` (dangling images of this project, then
+  index entries whose image is gone) are a Typer sub-app.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
@@ -305,7 +353,7 @@ green, pushed, and the README describes it with real output.
 - [x] 1. Rust-aware patch split and `#[cfg(test)]` report
 - [x] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
 - [x] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
-- [ ] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
+- [x] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
 - [ ] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
 - [ ] 6. Task bundle export, `verify` command and batch recipes with two-crate e2e
 

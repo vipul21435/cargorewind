@@ -12,7 +12,9 @@ Give it a repository and a fix commit. It exports a benchmark-style task bundle:
 `test.patch`, a `fix.patch`, a `split.json` report of how the diff was divided, a
 `toolchain.json` report of how the toolchain was chosen, a `lock.json` report of how
 the dependencies were fixed (plus the `Cargo.lock` it wrote when the commit had none),
-and the logs of every run.
+a `probes.json` report of the sanity probes that prove the fix is absent at base and
+present after it, the `recipe.json` whose hash names the image, and the logs of every
+run.
 
 ## What works today
 
@@ -123,12 +125,21 @@ and the logs of every run.
   1.39), and builds and runs every stage with `--offline` under
   `docker run --network none`. It is refused below cargo 1.37, which has no
   `cargo vendor`.
-- **Deterministic environment Dockerfile.** Pinned base, non-root user,
-  `LABEL project=cargorewind`, `CARGO_BUILD_JOBS=2`, one of the three dependency
-  strategies above, and a warm `cargo test --no-run`. A date-bounded lockfile adds a
-  `toolchain` stage: the pin loop runs in a container of that stage, and the final
-  stage copies the lockfile in. Images are tagged with the base commit and a digest of
-  the Dockerfile and lockfile. As root, before the user switch, it runs
+- **Dockerfile rendered from a typed, hashed recipe.** A `Recipe` holds everything the
+  image depends on: the digest-pinned base image, the toolchain and what rustup adds,
+  the base commit, the lock strategy (and the sha256 of a lockfile cargorewind wrote),
+  vendoring, the probe identifiers, and the warm-build and test commands. Rendering is
+  a pure function of it, and five golden Dockerfiles pin every byte. Every field that
+  reaches a Dockerfile line is checked with `fullmatch` when the recipe is created, so
+  no value can carry a newline or shell syntax into the file. The recipe hash is the
+  sha256 of its canonical JSON (sorted keys, no whitespace, ASCII), written to
+  `recipe.json`; it is the image tag (`cargorewind/<repo>:<first 16 hex digits>`), the
+  `cargorewind.recipe` label and the build cache key. The file has a pinned base,
+  non-root user, `LABEL project=cargorewind`, `CARGO_BUILD_JOBS=2`, one of the three
+  dependency strategies above and a warm `cargo test --no-run`. A date-bounded lockfile
+  adds a `toolchain` stage: it is rendered on its own for the pin loop, and the final
+  stage (rendered once the lockfile's hash is known) copies the lockfile in. As root,
+  before the user switch, it runs
   `rustup toolchain install` for a dated channel and `rustup component add` or
   `target add` for what the toolchain file lists. It sets `RUSTUP_TOOLCHAIN` whenever
   the base checkout has a toolchain file or a patch adds or changes one, so rustup
@@ -136,6 +147,33 @@ and the logs of every run.
   mean today's stable and cannot be installed under `--network none`). Toolchain
   files that are symlinks (a legacy `rust-toolchain` pointing at
   `rust-toolchain.toml`) are read through the link, like rustup does.
+- **Sanity probes: the fix is absent at base and present after it.** A probe is a
+  `fn`, `struct`, `enum`, `trait`, `const` or `macro_rules!` name that the patches
+  define on an added line, found with the Rust lexer (so names in comments, strings
+  and doc examples do not count; `const fn`, const generics and `*const T` are not
+  consts). Only names that occur nowhere in the base commit's `*.rs` files as a whole
+  word (`git grep -w`) are kept, because for those a plain `grep -w` in a container is
+  exact; the others are listed as skipped, with the files they occur in. At most 16
+  are kept, the fix's own names first. The probes are checked three times: on the
+  host against the exact files each stage receives (absent at base, the test's names
+  defined in the before tree and the fix's names not yet, every name defined after);
+  in the image build, where a `RUN grep` step fails the build if any name exists in
+  the checkout it copied; and in the before and after runs, where the stage script
+  greps the unpacked checkout and exits 97 before cargo runs if a name is missing.
+  Together with the `git apply --check` results of the split they form
+  `probes.json`, and a failed probe makes `rewind` exit 2 even when the flip holds.
+- **Recipe-hash build cache.** `rewind` looks the recipe hash up in a JSON index
+  (`build-index.json` in the cache directory) and reuses the image instead of building
+  it. A hit needs Docker to still have an image under the indexed tag whose
+  `cargorewind.recipe` label equals the hash, so a deleted or retagged image is
+  rebuilt, never trusted. Each recipe has its own `flock`, held from the lookup to the
+  end of the build: a second run of the same recipe waits and then reuses the image
+  instead of building it twice (and gives up with an error after the timeout). Index
+  writes take a short lock of their own and replace the file atomically.
+  `--rebuild` skips the lookup and builds with `docker build --no-cache`, then prunes
+  dangling images with the `label=project=cargorewind` filter only.
+  `cargorewind cache list` shows the index; `cargorewind cache prune` removes this
+  project's dangling images and the entries whose image is gone.
 - **Three isolated runs.** base (no patches), before (test patch) and after (test and
   fix patches). Each run streams its changed files into
   `docker run --network none` as a tar on stdin, so it needs no bind mounts and no git
@@ -147,8 +185,9 @@ and the logs of every run.
   instead of inflating FAIL_TO_PASS. Regressions block verification.
 - **Record and replay.** `--record` writes a transcript of the Docker builds, test runs
   and pin-loop session steps. `--replay` answers from that transcript offline, but only
-  when the Dockerfile, every file overlay and every session script are byte-identical
-  to the recorded ones, checked by sha256.
+  when the Dockerfile, every file overlay, every stage script (with its probe words)
+  and every session script are byte-identical to the recorded ones, checked by sha256.
+  The build cache is off for both, so a transcript always holds a real build.
 
 ## Quickstart
 
@@ -162,6 +201,7 @@ make lock-demo   # offline: replays the pin loop that bounds which-rs's lockfile
 make check       # ruff, mypy --strict, pytest with the 90% coverage gate
 make demo-live   # needs Docker: builds rust:1.39.0-slim and runs all three stages
 make lock-demo-live  # needs Docker: the same pin loop with real cargo in rust:1.73.0-slim
+make e2e         # needs Docker: the live e2e tests (flip, pin loop, cache reuse, probe)
 ```
 
 ## Usage
@@ -179,7 +219,10 @@ cargorewind rewind <git-url | path | bundle> --fix <sha> [--base <sha>] [--out o
     [--workdir .cargorewind/<name>] [--image rust:X-slim@sha256:...]
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
     [--vendor] [--index-dir <recorded index>]
+    [--build-cache | --no-build-cache] [--rebuild]
     [--record transcript.json | --replay transcript.json] [--timeout 3600]
+cargorewind cache list [--cache-dir ~/.cache/cargorewind]
+cargorewind cache prune [--cache-dir ~/.cache/cargorewind]
 ```
 
 `toolchain` reads toolchain files and manifests at the fix's base commit and dates the
@@ -189,9 +232,11 @@ Exit codes: `split` returns 0 when every check passes and 1 otherwise. `toolchai
 returns 0 when it resolves a toolchain and a pinned image and 1 otherwise. `lock`
 returns 0 when the lockfile is committed or every crates.io entry is bounded, 2 when
 some entry cannot be bounded, and 1 on errors. `rewind` returns
-0 when the flip is verified, 2 when the runs complete but the flip is not verified, and
-1 on errors (unknown commit, patch that does not apply, unpinned toolchain, transcript
-mismatch).
+0 when the flip is verified and every probe passed, 2 when the runs complete but the
+flip is not verified or a stage probe failed, and 1 on errors (unknown commit, patch
+that does not apply, a failed host probe, unpinned toolchain, a build the Dockerfile
+probe stopped, transcript mismatch). `cache prune` returns 1 when Docker cannot be
+reached.
 
 ### The full rewind
 
@@ -215,20 +260,28 @@ check     both patches reproduce the fix (2 paths): ok
 toolchain 1.39.0: newest stable before 2019-12-13 (1.39.0 released 2019-11-07)
 image     rust:1.39.0-slim@sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652
 lockfile  none, and no crates.io dependencies: cargo generates it in the image
-build     cargorewind/strsim-rs:c4cdd9c35dfa-fa8bab55b1d0
+probe     test fn jaro_same_one_character (src/lib.rs:495): absent at base, defined before and after
+probe     test fn jaro_winkler_same_one_character (src/lib.rs:570): absent at base, defined before and after
+probe     2 identifier(s), every host check passed; the image build and the before and after runs grep their checkouts too
+recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
+build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache off: no build cache (replay, record or --no-build-cache))
 run       base   exit   0  102 passed, 0 failed, 0 ignored
 run       before exit 101  102 passed, 2 failed, 0 ignored
 run       after  exit   0  104 passed, 0 failed, 0 ignored
+probe     in Docker: build passed, before passed, after passed
 FAIL_TO_PASS  2
   tests::jaro_same_one_character
   tests::jaro_winkler_same_one_character
 PASS_TO_PASS  102
+probes        2 identifier(s) passed
 verdict       VERIFIED fail-to-pass flip
-bundle        out/demo/ (task.json, split.json, toolchain.json, lock.json, Dockerfile, patches, logs/)
+bundle        out/demo/ (task.json, split.json, toolchain.json, lock.json, probes.json, recipe.json, Dockerfile, patches, logs/)
 ```
 
-The live run (`make demo-live`) prints the same lines without the `mode` line. An
-excerpt of the exported `out/demo/task.json`:
+The live run (`make demo-live`) prints the same lines without the `mode` line. In a
+replay, the `probe     in Docker` line reports the recorded run: the transcript holds
+the sha256 of each stage script, probe words included, so a replay with other probes
+is refused. An excerpt of the exported `out/demo/task.json`:
 
 ```json
 {
@@ -249,6 +302,15 @@ excerpt of the exported `out/demo/task.json`:
   "lock_report": "lock.json",
   "vendored": false,
   "test_command": "cargo test --no-fail-fast",
+  "recipe": {"hash": "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f",
+             "report": "recipe.json"},
+  "image_tag": "cargorewind/strsim-rs:d56b85f51c7a8dc2",
+  "build_cache": {"status": "off", "reason": "no build cache (replay, record or --no-build-cache)"},
+  "probes": {"identifiers": [{"kind": "fn", "name": "jaro_same_one_character",
+                              "patch": "test", "path": "src/lib.rs", "line": 495}, "..."],
+             "skipped": 0,
+             "container_checks": {"build": "passed", "before": "passed", "after": "passed"},
+             "ok": true, "report": "probes.json"},
   "split": {"test_files": ["src/lib.rs"], "fix_files": ["CHANGELOG.md", "src/lib.rs"],
             "shared_files": ["src/lib.rs"], "report": "split.json", "...": "..."},
   "runs": {"before": {"exit_code": 101, "timed_out": false, "passed": 102, "failed": 2,
@@ -277,12 +339,76 @@ RUN useradd --create-home --uid 10001 rewind
 USER rewind
 WORKDIR /home/rewind/repo
 COPY --chown=rewind:rewind repo/ ./
+# Sanity probe: the identifiers the patches add must not exist at the base commit.
+RUN grep -rlwF --include='*.rs' \
+        -e jaro_same_one_character \
+        -e jaro_winkler_same_one_character \
+        . ; \
+    test $? -eq 1 || { echo "cargorewind probe failed: found at base (files above)" >&2; exit 1; }
 # No Cargo.lock at the base commit and no crates.io dependencies, so there is
 # nothing to bound by the commit date: cargo writes the lockfile here.
 RUN cargo generate-lockfile
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
+LABEL cargorewind.recipe=d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
 ```
+
+### Sanity probes and the build cache
+
+The strsim-rs fix changes an existing function, so its only new names are the two
+tests; `probes.json` lists them with the patch that adds them, the four host checks,
+the three `git apply` results and the in-Docker results. A fix that adds a function is
+covered by the unit tests: for a test that calls a new `triple`, the before run only
+has to contain `triple_works`, and `triple` must not be defined there yet.
+
+Both Docker-side checks were run by hand against the real strsim-rs checkout. The
+image build with a word that is already defined at base (the recipe from the demo with
+`probes=("generic_jaro",)`, built with `docker build`) stops at the probe step:
+
+```text
+#9 [5/7] RUN grep -rlwF --include='*.rs'         -e generic_jaro         . ;     test $? -eq 1 || { ... }
+#9 0.123 ./src/lib.rs
+#9 0.123 cargorewind probe failed: found at base (files above)
+#9 ERROR: process "/bin/sh -c grep -rlwF ..." did not complete successfully: exit code: 1
+```
+
+The stage script of the before run, started on the plain base image without the
+test patch (so `jaro_same_one_character` is missing), exits before cargo runs:
+
+```text
+$ docker run --rm --network none cargorewind/strsim-rs:d56b85f51c7a8dc2 sh -c "cd /home/rewind/repo && for w in jaro_same_one_character; do grep -rqwF --include='*.rs' -e \"\$w\" . || { echo \"cargorewind probe failed: \$w is missing\"; exit 97; }; done && exec cargo test --no-fail-fast 2>&1"
+cargorewind probe failed: jaro_same_one_character is missing
+$ echo $?
+97
+```
+
+The build cache, live on the same fix with a fresh cache directory. The first run
+passes `--rebuild` (so every step of the Dockerfile runs again, `--no-cache`), the
+second finds the labelled image:
+
+```text
+$ cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/cache-demo-1 --cache-dir <dir> --rebuild
+recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
+build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache miss: --rebuild: built with --no-cache; Total reclaimed space: 0B; built in 2.4 s)
+verdict       VERIFIED fail-to-pass flip
+$ cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/cache-demo-2 --cache-dir <dir>
+recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
+build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache hit: image cargorewind/strsim-rs:d56b85f51c7a8dc2 built 2026-09-30T00:19:54+00:00 in 2.4 s)
+verdict       VERIFIED fail-to-pass flip
+$ cargorewind cache list --cache-dir <dir>
+index     <dir>/build-index.json (1 image(s))
+d56b85f51c7a8dc2  cargorewind/strsim-rs:d56b85f51c7a8dc2  built 2026-09-30T00:19:54+00:00 in 2.4 s  1.39.0  base c4cdd9c35dfa
+```
+
+(Excerpts: the other lines match the demo above.) The recipe hash of the live run is
+the one pinned in `tests/fixtures/dockerfiles/strsim.recipe.json`, and it equals the
+image's `cargorewind.recipe` label (`docker image inspect`). On this Mac, Docker uses
+the containerd image store, where the image a rebuild replaces is not left dangling,
+so the prune reclaimed 0 B. Lock contention is tested with a fake runner: while one
+run builds a recipe, a second run of the same recipe logs
+`cache     waiting for another run that builds recipe <hash>`, then reuses the image;
+`backend.build` runs once.
 
 ### The split on its own
 
@@ -432,7 +558,7 @@ USER rewind
 `windows-sys` and `once_cell` on Windows, and `tempfile` for tests. The history up to
 that commit is bundled in `examples/which-rs/` with its license. Real output of
 `make lock-demo`, which replays a live run recorded with `make record-lock-demo`
-(offline, 0.28 s wall):
+(offline, 0.25 s wall):
 
 ```text
 mode      replay of examples/which-rs/lock-transcript.json (no Docker)
@@ -441,7 +567,7 @@ fix       e776ff05bc7c  committed 2023-10-17T22:45:33+00:00
 toolchain 1.73.0 (release-date): newest stable before 2023-10-17 (1.73.0 released 2023-10-05)
 lockfile  none: 7 crates.io requirement(s); bounding every package to before 2023-10-17T22:45:33+00:00
 image     rust:1.73.0-slim@sha256:666012b6779ebb6be2acb771b8627716662cf699502e734652c4799ae4199691
-build     cargorewind/toolchain-stage:a08cf0a86265 (toolchain stage for the pin loop)
+build     cargorewind/toolchain-stage:040352928697 (toolchain stage for the pin loop)
 lock      generated: 41 crates.io package(s), 32 published at or after 2023-10-17T22:45:33+00:00
 pin       round 1: 5 package(s)
           either 1.18.0 -> 1.9.0 (ok)
@@ -472,7 +598,7 @@ Sixteen pins cover 32 late entries: once `home`, `rustix` and `tempfile` are bac
 `r-efi` from the graph, leaving only the `windows-sys` 0.48 family that which-rs asks
 for itself (41 entries become 27). Without the bound the environment does not build. The same
 toolchain image, with a plain `cargo generate-lockfile` and `cargo build`
-(`docker run --rm cargorewind/toolchain-stage:887233ab831d sh -c '...'`), locks
+(`docker run --rm <toolchain-stage image> sh -c '...'`), locks
 `home 0.5.12` and stops:
 
 ```text
@@ -518,22 +644,29 @@ An excerpt of `out/lock-demo/lock.json`:
 The full live rewind of the same commit with `--vendor` builds the two-stage
 environment, vendors the 27 locked crates and runs every stage offline. Command:
 `uv run cargorewind rewind examples/which-rs/which-rs.bundle --fix e776ff0 --vendor
---index-dir examples/which-rs/index --out out/which-vendored`. Its last lines (the pin
-lines are the same as above):
+--index-dir examples/which-rs/index --out out/which-live --cache-dir <dir>`. Its last
+lines (the pin lines are the same as above). The image was a cache hit: `make e2e` had
+just built the same recipe, and the label on its image matched:
 
 ```text
+probe     no new identifier to probe; the flip is the only evidence
+build     cargorewind/toolchain-stage:040352928697 (toolchain stage for the pin loop)
+lock      generated: 41 crates.io package(s), 32 published at or after 2023-10-17T22:45:33+00:00
 lock      16 pin(s) in 4 round(s); every crates.io package is bounded
-build     cargorewind/which-rs:70d2d1c97048-a1cac10abe6c
+recipe    ed8bcdbbfe90617ee16510c0ad12bb963b5c72d26c5ac77430fd8bdd8ee2d82e
+build     cargorewind/which-rs:ed8bcdbbfe90617e (cache hit: image cargorewind/which-rs:ed8bcdbbfe90617e found in Docker and indexed again)
 run       base   exit   0  19 passed, 0 failed, 0 ignored
 run       before exit   0  19 passed, 0 failed, 0 ignored
 run       after  exit   0  19 passed, 0 failed, 0 ignored
 FAIL_TO_PASS  0
 PASS_TO_PASS  19
+probes        none (no new identifier to probe)
 verdict       NOT VERIFIED fail-to-pass flip
-bundle        out/which-vendored/ (task.json, split.json, toolchain.json, lock.json, Cargo.lock, Dockerfile, patches, logs/)
+bundle        out/which-live/ (task.json, split.json, toolchain.json, lock.json, Cargo.lock, probes.json, recipe.json, Dockerfile, patches, logs/)
 ```
 
-This fix commit changes no test, so there is no flip to verify (exit 2); the run shows
+This fix commit changes no test and adds no new name, so there is no flip to verify
+and nothing to probe (exit 2); the run shows
 that the bounded environment builds and its 19 tests (16 in `tests/basic.rs`, 3
 doctests) pass with `--offline` under `--network none`. The dependency part of its
 `Dockerfile`:
@@ -554,6 +687,8 @@ RUN mkdir -p /home/rewind/.cargo \
 ENV CARGO_NET_OFFLINE=true
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run --offline
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
+LABEL cargorewind.recipe=ed8bcdbbfe90617ee16510c0ad12bb963b5c72d26c5ac77430fd8bdd8ee2d82e
 ```
 
 A commit with a committed lockfile needs no Docker for this step. which-rs `17fde4a`
@@ -586,17 +721,20 @@ flowchart LR
     TC --> REG["registry: offline digest table, or cache + registry HEAD"]
     GIT --> LOCK["lockstage: committed Cargo.lock, generated, or date-bounded"]
     LOCK --> PIN["deps + crateindex + semver: pin loop over sparse index metadata"]
-    REG --> DF["dockerfile: pinned rust:X-slim, toolchain stage, vendoring, CARGO_BUILD_JOBS=2"]
+    REG --> DF["dockerfile: Recipe, hash, pinned rust:X-slim, toolchain stage, vendoring"]
     LOCK --> DF
+    PR --> DF
     PIN -->|session in the toolchain stage| BE
     CHECK --> OV["overlays: apply on host, capture each stage's files"]
-    DF --> BE{"backend"}
+    OV --> PR["probes: new names absent at base, host checks, probes.json"]
+    DF --> BC["buildcache: recipe hash index, per-recipe flock, label check"]
+    BC --> BE{"backend"}
     OV --> BE
     BE -->|DockerBackend| RUN["docker build, then 3 x docker run --network none"]
     BE -->|ReplayBackend| REC["recorded transcript, digests checked"]
     RUN --> LT["libtest parser and flip rules"]
     REC --> LT
-    LT --> OUT["task.json, toolchain.json, lock.json, Cargo.lock, Dockerfile, patches, logs"]
+    LT --> OUT["task.json, toolchain.json, lock.json, probes.json, recipe.json, Dockerfile, patches, logs"]
 ```
 
 | Module | Role |
@@ -615,29 +753,33 @@ flowchart LR
 | `lockfile.py` | `Cargo.lock` v1 to v4: format detection, packages, dependency edges |
 | `crateindex.py` | crates.io sparse index entries: live with a cache, or a recorded directory |
 | `deps.py` | manifest requirements, the date-bounded pin loop, cargo scripts for a session |
-| `lockstage.py` | lock strategy, pin loop in the toolchain stage, `lock.json`, image tags |
-| `dockerfile.py` | deterministic environment Dockerfile from a `Recipe`: rustup, lock, vendor |
-| `backend.py` | Docker, recording and replay backends; sessions; file overlays as tar streams |
+| `lockstage.py` | lock strategy, pin loop in the toolchain stage, `lock.json`, recipe tags |
+| `dockerfile.py` | validated `Recipe`, canonical JSON and hash, deterministic Dockerfile |
+| `probes.py` | definitions on added lines, probe choice, host checks, `probes.json` |
+| `buildcache.py` | recipe-hash image index, per-recipe `flock`, reuse by label, prune |
+| `backend.py` | Docker, recording and replay backends; sessions; stage scripts with probes |
 | `libtest.py` | libtest text parser and the three-run flip classification |
 | `rewind.py` | the pipeline and the `task.json` document |
-| `cli.py` | Typer CLI: `split`, `toolchain`, `lock`, `rewind`, `doctor`, `version` |
+| `cli.py` | Typer CLI: `split`, `toolchain`, `lock`, `rewind`, `cache`, `doctor`, `version` |
 
 ## Measured
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 406 passed, 2 Docker tests deselected | `make cov` |
-| Line and branch coverage of `src/` | 98.71% (gate: 90%) | `make cov` |
-| Dependency tests (semver, lockfile, index, pin loop, lock stage) | 99 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
-| Toolchain and registry tests | 77 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
+| Tests (no Docker) | 491 passed, 4 Docker tests deselected | `make cov` |
+| Line and branch coverage of `src/` | 98.88% (gate: 90%) | `make cov` |
+| Recipe, golden Dockerfile, probe and build cache tests | 65 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
+| Dependency tests (semver, lockfile, index, pin loop, lock stage) | 100 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
+| Toolchain and registry tests | 90 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
 | Lexer, scanner, layout and split tests (with the regression suite) | 159 passed | `uv run pytest tests/test_rustlex.py tests/test_rustscan.py tests/test_layout.py tests/test_patchsplit.py tests/test_splitreport.py tests/test_split_regressions.py` |
-| Offline split of the demo fix, fresh work directory | 0.44 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
+| Offline split of the demo fix, fresh work directory | 0.40 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
-| Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs) | 2 passed, 12.2 s with a warm Docker cache | `time make e2e` |
-| Live e2e on GitHub Actions (amd64: both e2e tests, image pulls, pin loop, vendored build, six runs) | 42 s step time | CI run [36646246333](https://github.com/vipul21435/cargorewind/actions/runs/36646246333), step "Live end-to-end runs through Docker" |
-| Offline demo, fresh work directory | 0.60 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
-| Offline toolchain inference of the demo fix, fresh work directory | 0.22 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
-| Offline replay of the which-rs pin loop, fresh work directory | 0.28 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
+| Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs; cache reuse by label; build stopped by the probe) | 4 passed, 19.7 s with a warm Docker cache | `time make e2e` |
+| Live e2e on GitHub Actions (amd64: the four e2e tests, image pulls, pin loop, vendored build) | 51 s step time | CI run [36650143288](https://github.com/vipul21435/cargorewind/actions/runs/36650143288), step "Live end-to-end runs through Docker" |
+| strsim-rs environment rebuilt with `--rebuild` (`docker build --no-cache`, base image present) | 2.4 s build | `cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --cache-dir <dir> --rebuild` (see "Sanity probes and the build cache") |
+| Offline demo, fresh work directory | 0.56 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
+| Offline toolchain inference of the demo fix, fresh work directory | 0.21 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
+| Offline replay of the which-rs pin loop, fresh work directory | 0.25 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
 | First live pin loop on which-rs `e776ff0`, including the rust:1.73.0-slim pull | 2 min 4 s wall; 41 crates.io packages, 32 late, 16 pins in 4 rounds | `time uv run cargorewind lock <which-rs clone> e776ff0 --registry --cache-dir <dir>` |
 | Live vendored rewind of which-rs `e776ff0` (toolchain stage cached, final stage built) | 19.2 s wall; 27 crates vendored, 19 tests pass offline in all 3 runs | `time uv run cargorewind rewind <which-rs clone> --fix e776ff0 --vendor --registry --cache-dir <dir>` |
 | Committed-lockfile check of which-rs `17fde4a`, including the clone | 1.85 s wall | `time uv run cargorewind lock https://github.com/harryfei/which-rs 17fde4a` |
@@ -655,8 +797,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 
 - **The host never runs cargo.** Every `docker` and `git` call goes through one
   `Runner`, so unit tests use a fake runner or throwaway git repositories and never
-  need Docker. Two `docker`-marked tests run the live paths (the strsim-rs flip and
-  the which-rs pin loop with a vendored build), and CI runs them.
+  need Docker. Four `docker`-marked tests run the live paths (the strsim-rs flip, the
+  which-rs pin loop with a vendored build, reuse of a cached image by its label, and
+  a build stopped by the probe), and CI runs them.
 - **Three runs, not two.** A test patch that calls a function only the fix adds makes
   the before run fail to compile, and then every test looks like it failed. The base
   run tells existing passing tests (PASS_TO_PASS) apart from real new failures.
@@ -669,6 +812,21 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   strsim-rs. The replay refuses to answer if the Dockerfile or any overlay differs
   from what was recorded, so drift in the split or toolchain logic fails the demo
   instead of silently reusing stale output.
+- **Probes a word search can prove.** A name is only a probe when it occurs nowhere at
+  base as a whole word, so the in-image `grep -w` has no false alarms from comments,
+  strings or unrelated uses, and it needs nothing but the grep of the old Debian
+  image. The host decides what a definition is (with the lexer); Docker only answers
+  "is this word there". The image build checks absence because the build context is
+  what a wrong commit, a stale context or a reused image would get wrong; the stage
+  runs check presence because the overlay is what the tar stream could fail to
+  deliver. Absence is not checked in the before run, because a test that calls a new
+  function legitimately contains its name.
+- **Cache hits are proven by the label, not by the index.** The index only says which
+  tag to look at; reuse also needs the image's `cargorewind.recipe` label to equal the
+  hash. The recipe covers everything the image depends on, including the sha256 of a
+  lockfile the pin loop wrote, so a new lockfile is a new image. The probe step and
+  the label are rendered after the checkout copy and at the end of the file, so they
+  do not invalidate Docker's layer cache for the toolchain stage.
 - **A module walk, not a directory guess.** Whether a file is test code depends on how
   it is declared, not on where it sits: `src/tests.rs` is test code when `lib.rs` says
   `#[cfg(test)] mod tests;` and library code when it says `mod tests;`. So the split
@@ -778,19 +936,31 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   deleting the cache file forces a new lookup. Offline, the digest table covers
   9 versions, and other versions need `--registry` or `--image`.
 - The bundle does not contain the base source tree, and there is no `verify` command
-  that rebuilds from a bundle alone. There is no recipe-hash build cache beyond
-  Docker's own layer cache.
+  that rebuilds from a bundle alone.
+- Probes only cover new `fn`, `struct`, `enum`, `trait`, `const` and `macro_rules!`
+  names that occur nowhere at base. A fix that only changes existing code (as the
+  strsim-rs fix does) is probed through its new tests alone, or not at all, and then
+  the flip is the only evidence. `static`, `type`, `mod`, `union` and `impl` blocks are
+  not probed, raw identifiers and non-ASCII names are skipped, and the word search
+  covers `*.rs` files only (a name that exists only in `.gitattributes`
+  `export-ignore` files counts as present at base).
+- With a date-bounded lockfile the pin loop runs again before the cache lookup,
+  because the lockfile's hash is part of the recipe; only the final image build is
+  skipped. The toolchain-stage images are not in the index (Docker's layer cache
+  covers them).
+- The build cache is local to one machine and its Docker daemon. Its locks are
+  `flock`s, which network file systems may not honor. `--rebuild` rebuilds every
+  stage, the toolchain stage included, because `docker build --no-cache` applies to
+  the whole file.
 - Diff paths that git quotes (unusual characters) are not parsed.
 
 ## Roadmap
 
 Planned in [PLAN.md](PLAN.md), in order:
 
-1. Sanity probes (identifiers the fix adds must be absent at base) and a recipe-hash
-   build cache.
-2. Test selection by exact name, a JSON libtest parser for nightly, and flaky
+1. Test selection by exact name, a JSON libtest parser for nightly, and flaky
    detection by reruns.
-3. A versioned task bundle schema, a `verify` command, batch recipes and a second
+2. A versioned task bundle schema, a `verify` command, batch recipes and a second
    crate with a verified flip in the e2e suite.
 
 ## License
