@@ -225,17 +225,22 @@ table.
   path, with an `unknown` target as the last resort. Old cargo prints only the binary
   name, which maps to the one target that builds it. When several do (the library, a
   `src/main.rs` binary and a `tests/<crate>.rs` test are all named after the crate),
-  the test gets a shared target, `lib x or test x`, rerun with `--tests`: every binary
-  a stage runs, no doctests, and valid in a stage that lacks one of those targets
-  (checked on rust 1.39.0, `tests/fixtures/libtest/shared-binary-1.39.0.txt`). A
-  test's id is its name, qualified as
+  the test gets a shared target, `lib x or test x`, rerun with `--no-fail-fast
+  --tests`: every binary a stage runs, no doctests, and valid in a stage that lacks
+  one of those targets. `--no-fail-fast` stays because `--exact` also runs a test of
+  the same name in the other binaries, and without it a failing namesake in a binary
+  that runs first stops cargo before the shared one (checked on rust 1.39.0,
+  `tests/fixtures/libtest/shared-binary-1.39.0.txt` and
+  `shared-binary-fail-fast-1.39.0.txt`). An `unknown` target keeps it for the same
+  reason. A test's id is its name, qualified as
   `name [test it]` only when two targets have a test of that name, so the strsim-rs
   task keeps the plain names. `task.json` lists every test with its target, its
   status in each run and the command that reruns it, shell-quoted, so a doctest
   filter such as `Parser<'a>::new` is one argument when the line is pasted into `sh`.
 - **Reruns by exact name and flaky detection.** Every FAIL_TO_PASS and PASS_TO_PASS
   candidate is rerun with `cargo test --lib|--test <name>|--bin <name> -- --exact
-  <test>` (`--tests` for a shared target) three times (`--reruns`, 0 turns it off) in the stages that decided it:
+  <test>` (`--no-fail-fast --tests` for a shared target) three times (`--reruns`, 0
+  turns it off) in the stages that decided it:
   `after` for all, `before` for the tests that run reported, `base` for a
   PASS_TO_PASS test whose verdict came from the base run because `before` did not
   build. Doctests are the exception: rustdoc splits its test arguments on whitespace,
@@ -1174,14 +1179,14 @@ flowchart LR
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 660 passed, 6 Docker tests deselected | `make cov` |
+| Tests (no Docker) | 661 passed, 6 Docker tests deselected | `make cov` |
 | Line and branch coverage of `src/` | 98.83% (gate: 90%) | `make cov` |
 | Bundle schema, verify and batch tests (plus 3 CLI tests) | 59 passed | `uv run pytest tests/test_bundle.py tests/test_verify.py tests/test_batch.py` |
 | Offline batch of `examples/batch.toml` (2 replayed rewinds, 1 duplicate), fresh work directory | 1.82 s wall (median of 3) | `rm -rf .cargorewind out/batch && time make batch-demo` |
 | Offline verify of the demo bundle | 0.50 s wall (median of 3) | `time uv run cargorewind verify out/demo --replay examples/strsim/transcript.json` after `make demo` |
 | Live batch of `examples/batch.toml` through Docker, images cached by label | 3 min 42 s wall: strsim-rs 24.5 s, semver 197.4 s (pin loop included), duplicate 0 s; 2 verified, 1 duplicate | `time uv run cargorewind batch examples/batch.toml --live --out out/batch-live --cache-dir <dir>` (numbers from `summary.md`) |
 | First live semver `d92a4d8` rewind (toolchain stage and `rust:1.68.0-slim` present, final image built) | 6 min 0 s wall; FAIL_TO_PASS 1, PASS_TO_PASS 34, 1 pin | `time uv run cargorewind rewind examples/semver/semver.bundle --fix d92a4d8 --registry --cache-dir <dir> --record <file>` |
-| libtest parser, target resolution, flip and rerun tests | 64 passed (9 recorded runs of the zoo crate on 3 toolchains, 1 rust 1.39.0 recording of a shared binary name) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
+| libtest parser, target resolution, flip and rerun tests | 65 passed (9 recorded runs of the zoo crate on 3 toolchains, 2 rust 1.39.0 recordings of a shared binary name) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
 | Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
 | One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:edcbd61bae401cff sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
 | Recipe, golden Dockerfile, probe and build cache tests | 75 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
@@ -1393,7 +1398,10 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 - On old cargo, which prints only the binary, a test name that the library and a
   bin or integration test named after the crate both have is one test of their shared
   target, merged with a failure winning. A shared target's reruns run every test
-  binary of the stage (`--tests`), each filtering to the exact name. A test
+  binary of the stage (`--no-fail-fast --tests`), each filtering to the exact name,
+  so a test of the same name in another binary runs too: its result is ignored, but
+  its time counts against the rerun's `--test-timeout`, and if it hangs until that
+  timeout the shared test is reported `timeout` for the round and becomes flaky. A test
   that prints a bare `ok` or `FAILED` line under `--nocapture` can resolve a pending
   result early, and the parser does not know a test binary's own crash from a test
   failure beyond marking the test that was running as failed.

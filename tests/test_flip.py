@@ -4,10 +4,12 @@ from pathlib import Path
 
 from cargorewind.backend import RunResult
 from cargorewind.flip import (
+    STAGES,
     Flip,
     Rerun,
     StageState,
     StageTests,
+    TestKey,
     apply_reruns,
     assign_ids,
     changed_outcomes,
@@ -166,7 +168,8 @@ def test_rerun_plan_picks_the_stages_that_decided_each_candidate() -> None:
         "base": ["only_base"],
     }
     new = plan["after"][0]
-    assert new.command == ("cargo", "test", "--offline", "--", "--exact", "new")
+    # An unknown target runs every binary, so --no-fail-fast stays.
+    assert new.command == ("cargo", "test", "--no-fail-fast", "--offline", "--", "--exact", "new")
     assert new.raw == "new" and new.key == (UNKNOWN_TARGET, "new")
 
 
@@ -327,14 +330,16 @@ def test_a_broken_crate_doctest_of_old_rustdoc_is_a_regression() -> None:
     assert crate_doc.raw == "src/lib.rs -  (line 1)"
 
 
-SHARED_BINARY = Path(__file__).parent / "fixtures" / "libtest" / "shared-binary-1.39.0.txt"
+RECORDINGS = Path(__file__).parent / "fixtures" / "libtest"
+SHARED_BINARY = RECORDINGS / "shared-binary-1.39.0.txt"
+SHARED_FAIL_FAST = RECORDINGS / "shared-binary-fail-fast-1.39.0.txt"
 
 
-def _recorded_sections() -> dict[str, str]:
-    """The ``@@@ <name>`` sections of the rust 1.39.0 recording (header comments dropped)."""
+def _recorded_sections(path: Path = SHARED_BINARY) -> dict[str, str]:
+    """The ``@@@ <name>`` sections of a rust 1.39.0 recording (header comments dropped)."""
     sections: dict[str, list[str]] = {}
     current: list[str] = []
-    for line in SHARED_BINARY.read_text().splitlines():
+    for line in path.read_text().splitlines():
         if line.startswith("@@@ "):
             current = sections.setdefault(line.removeprefix("@@@ "), [])
         elif not line.startswith("# "):
@@ -363,8 +368,17 @@ def test_old_cargo_reruns_a_test_of_tests_named_after_the_crate_in_its_own_binar
     assert shared.label == "lib tempdemo or test tempdemo"
     plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
     new = next(item for item in plan["after"] if item.id == "new_case")
-    assert new.command == ("cargo", "test", "--tests", "--", "--exact", "new_case")
-    # The recorded output of that command: new_case fails before and passes after.
+    assert new.command == (
+        "cargo",
+        "test",
+        "--no-fail-fast",
+        "--tests",
+        "--",
+        "--exact",
+        "new_case",
+    )
+    # The recording ran it without --no-fail-fast, which prints the same here (no binary
+    # before tempdemo fails): new_case fails before and passes after.
     reruns = {}
     for name, code in (("before", 101), ("after", 0)):
         items = [item for item in plan[name] if item.id == "new_case"]
@@ -439,3 +453,46 @@ def test_a_rerun_whose_build_outlasts_the_test_timeout_is_left_out() -> None:
     # A test that hangs once its binary runs is still a timeout, and still flaky.
     hung = _segment(1, 0, LIB_RUN + f"test {items[0].raw} ... ", 124)
     assert parse_reruns(hung, items[:1], 1, targets) == {items[0].key: [Status.TIMEOUT]}
+
+
+def test_a_shared_rerun_goes_on_past_a_failing_same_named_test_of_an_earlier_binary() -> None:
+    # tests/api.rs has a `smoke` that fails in every stage, and api runs before the shared
+    # tempdemo binary, whose `smoke` is the FAIL_TO_PASS test (rust 1.39.0 recording).
+    sections = _recorded_sections(SHARED_FAIL_FAST)
+    targets = TargetMap(
+        [
+            Target("lib", "tempdemo", "src/lib.rs"),
+            Target("test", "api", "tests/api.rs"),
+            Target("test", "tempdemo", "tests/tempdemo.rs"),
+        ]
+    )
+    stages = {s: stage_tests(s, RunResult(101, sections[s]), targets) for s in STAGES}
+    flip = compute_flip(stages["base"], stages["before"], stages["after"])
+    smoke = "smoke [lib tempdemo or test tempdemo]"
+    assert flip.fail_to_pass == [smoke]
+    assert flip.pass_to_pass == ["counts", "existing", "tests::unit"]
+    plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
+    item = next(item for item in plan["after"] if item.id == smoke)
+    assert item.command == ("cargo", "test", "--no-fail-fast", "--tests", "--", "--exact", "smoke")
+
+    def rerun(prefix: str) -> dict[str, dict[TestKey, list[Status]]]:
+        found = {}
+        for name in ("before", "after"):
+            body = sections[f"{prefix}rerun-{name}"]
+            output = "".join(_segment(round_, 0, body, 101) for round_ in (1, 2, 3))
+            found[name] = parse_reruns(output, [item], 3, targets)
+        return found
+
+    reruns = rerun("")
+    assert reruns == {"before": {item.key: [F, F, F]}, "after": {item.key: [P, P, P]}}
+    final = apply_reruns(flip, stages, reruns)
+    assert final.fail_to_pass == [smoke] and final.flaky == [] and final.verified
+    # Without --no-fail-fast cargo stopped after api's failure and never ran tempdemo:
+    # every round was missing, the test was flaky and FAIL_TO_PASS was empty.
+    fail_fast = rerun("fail-fast-")
+    assert fail_fast == {
+        "before": {item.key: [Status.MISSING] * 3},
+        "after": {item.key: [Status.MISSING] * 3},
+    }
+    dropped = apply_reruns(flip, stages, fail_fast)
+    assert dropped.fail_to_pass == [] and not dropped.verified

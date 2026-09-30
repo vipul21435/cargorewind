@@ -12,6 +12,9 @@ Old cargo prints only the binary, and the library, a ``src/main.rs`` binary and 
 crate's name. Such a binary resolves to a ``shared`` target that names every candidate
 (``lib demo or test demo``) and is rerun with ``--tests``, which runs every binary
 ``cargo test`` runs (but no doctests) and so reaches whichever of them has the test.
+Such a rerun keeps ``--no-fail-fast``: cargo stops at the first binary that fails, and
+``--exact <name>`` also runs a test of that name in every other binary, so a failing
+namesake in a binary that runs first would keep cargo from reaching the shared one.
 
 One test is rerun with ``cargo test <selector> -- --exact <name>``, which libtest
 matches on every toolchain. Doctests are the exception: rustdoc splits its test
@@ -59,6 +62,11 @@ class TestTarget:
         if self.kind in TARGET_KINDS:
             return (f"--{self.kind}", self.name)
         return ()  # unknown: every binary runs, and the result is picked by binary name
+
+    @property
+    def one_binary(self) -> bool:
+        """Whether the selector runs a single test binary (the doctests count as one)."""
+        return self.kind == "doc" or self.kind in TARGET_KINDS
 
 
 UNKNOWN_TARGET = TestTarget("unknown", "")
@@ -114,13 +122,22 @@ class TargetMap:
 
 def rerun_command(target: TestTarget, raw: str, stage_command: tuple[str, ...]) -> tuple[str, ...]:
     """The command that reruns one test, built from the stage's test command (which keeps
-    ``--offline`` and the JSON format flags; ``--no-fail-fast`` has no use for one test)."""
+    ``--offline`` and the JSON format flags).
+
+    ``--no-fail-fast`` is dropped when the selector runs one binary, where it changes
+    nothing, and kept (added if missing) when it runs several (a shared or unknown
+    target): without it cargo stops after the first binary that fails, and a failing
+    test of the same name in a binary that runs earlier would hide this one.
+    """
     if "--" in stage_command:
         cut = stage_command.index("--")
         head, tail = stage_command[:cut], stage_command[cut + 1 :]
     else:
         head, tail = stage_command, ()
-    head = tuple(word for word in head if word != "--no-fail-fast")
+    if target.one_binary:
+        head = tuple(word for word in head if word != "--no-fail-fast")
+    elif "--no-fail-fast" not in head:
+        head = (*head, "--no-fail-fast")
     if target.kind == "doc":
         item = doctest_item(raw) or raw
         filters: tuple[str, ...] = (max(item.split() or [item], key=len),)

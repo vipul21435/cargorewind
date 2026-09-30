@@ -535,6 +535,22 @@ test that fails on the old code:
 - `assign_ids_qualify_names_that_two_targets_share` lacked the `test_` prefix and
   never ran; renamed.
 
+## Follow-up on the shared target fix (2026-09-30)
+
+- A shared target's rerun (`--tests`) dropped `--no-fail-fast` with every other
+  rerun, so a failing test of the same name in a binary that runs first (tests/api.rs
+  before tests/<crate>.rs) stopped cargo before the shared binary: every round was
+  `missing` and the test was dropped as flaky. `rerun_command` now drops
+  `--no-fail-fast` only when the selector runs one binary (lib, bin, test, bench,
+  example, doc) and keeps it, adding it if the stage command lacks it, for shared and
+  unknown targets, which run several. Single-binary reruns keep their old command, so
+  the recorded strsim-rs and semver transcripts (checked by script digest) still
+  replay. Checked on rust 1.39.0; the recording is
+  `tests/fixtures/libtest/shared-binary-fail-fast-1.39.0.txt` (an original crate).
+- Left as a known issue: the namesake in the other binary still runs, and one that
+  hangs uses up the rerun's `--test-timeout`, so the shared test reads `timeout` for
+  that round.
+
 ## Stashed work
 
 - `stash@{0}` "wip from interrupted agent" was restored with `git stash pop` on

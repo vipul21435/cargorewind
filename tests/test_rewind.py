@@ -238,7 +238,9 @@ def test_rewind_synthetic_crate_end_to_end(
     }
     # Both candidates were rerun three times by exact name in before and after.
     assert sorted(backend.scripts) == ["rerun-after", "rerun-before"]
-    assert backend.scripts["rerun-after"].count("cargo test -- --exact tests::two") == 3
+    assert (
+        backend.scripts["rerun-after"].count("cargo test --no-fail-fast -- --exact tests::two") == 3
+    )
     assert backend.rerun_overlays["rerun-after"] == backend.overlays["after"]
     assert task["reruns"]["rounds"] == 3 and task["reruns"]["test_timeout"] == 300
     assert task["reruns"]["stages"]["before"] == {
@@ -251,7 +253,7 @@ def test_rewind_synthetic_crate_end_to_end(
     assert task["tests"]["tests::two"] == {
         "target": "unknown",
         "name": "tests::two",
-        "command": "cargo test -- --exact tests::two",
+        "command": "cargo test --no-fail-fast -- --exact tests::two",
         "statuses": {"base": "missing", "before": "failed", "after": "passed"},
         "reruns": {"before": ["failed"] * 3, "after": ["passed"] * 3},
     }
@@ -518,7 +520,10 @@ def test_rewind_without_reruns_and_with_a_base_rerun_for_a_compile_error(
     report = rewind(options, SubprocessRunner(), backend, lambda _: None)
     assert report.flip is not None and report.flip.verified
     assert sorted(backend.scripts) == ["rerun-after", "rerun-base"]
-    assert "timeout -k 10 9 cargo test -- --exact tests::zero" in backend.scripts["rerun-base"]
+    assert (
+        "timeout -k 10 9 cargo test --no-fail-fast -- --exact tests::zero"
+        in backend.scripts["rerun-base"]
+    )
     assert "tests::triple_works" not in backend.scripts["rerun-base"]
     task = json.loads((out / "task.json").read_text())
     assert task["runs"]["before"]["state"] == "compile-error"
@@ -555,7 +560,7 @@ def test_rewind_asks_a_nightly_toolchain_for_json_output(
     json_args = ("--", "-Z", "unstable-options", "--format", "json")
     assert backend.commands["after"] == ("cargo", "test", "--no-fail-fast", *json_args)
     assert (
-        "cargo test -- --exact tests::two -Z unstable-options --format json"
+        "cargo test --no-fail-fast -- --exact tests::two -Z unstable-options --format json"
         in (backend.scripts["rerun-after"])
     )
     task = json.loads((out / "task.json").read_text())

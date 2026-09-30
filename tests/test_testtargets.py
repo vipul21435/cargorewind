@@ -147,14 +147,28 @@ def test_rerun_commands() -> None:
     assert rerun_command(doc, "src/lib.rs - impl Foo<T> for Bar (line 3)", stage)[-1] == "Foo<T>"
     assert rerun_command(doc, "src/lib.rs - (line 8)", stage)[-1] == "src/lib.rs"
     assert rerun_command(doc, "", stage)[-1] == ""
+    # An unknown target runs every binary, so a failing namesake in one that runs first
+    # must not stop cargo before the right one: --no-fail-fast stays, or is added.
     assert rerun_command(TestTarget("unknown", "s"), "d", stage) == (
         "cargo",
         "test",
+        "--no-fail-fast",
         "--offline",
         "--",
         "--exact",
         "d",
     )
+    assert rerun_command(UNKNOWN_TARGET, "d", ("cargo", "test", "--", "--nocapture")) == (
+        "cargo",
+        "test",
+        "--no-fail-fast",
+        "--",
+        "--exact",
+        "d",
+        "--nocapture",
+    )
+    assert [TestTarget(k, "x").one_binary for k in ("lib", "bin", "test", "doc")] == [True] * 4
+    assert not TestTarget(SHARED, "x").one_binary and not UNKNOWN_TARGET.one_binary
 
 
 def test_old_cargo_binaries_that_several_targets_build_resolve_to_all_of_them() -> None:
@@ -176,14 +190,23 @@ def test_old_cargo_binaries_that_several_targets_build_resolve_to_all_of_them() 
     # --tests runs every binary a stage runs (not the doctests), so the rerun reaches the
     # test wherever it is, and is valid in a stage where one of the targets is missing.
     assert shared.selector == ("--tests",)
-    stage = ("cargo", "test", "--no-fail-fast")
+    # --no-fail-fast stays: cargo would otherwise stop at the first binary that fails.
+    stage = ("cargo", "test", "--no-fail-fast", "--offline")
     assert rerun_command(shared, "new_case", stage) == (
         "cargo",
         "test",
+        "--no-fail-fast",
+        "--offline",
         "--tests",
         "--",
         "--exact",
         "new_case",
+    )
+    assert rerun_command(shared, "new_case", ("cargo", "test"))[:4] == (
+        "cargo",
+        "test",
+        "--no-fail-fast",
+        "--tests",
     )
     # The same target listed twice (two packages of a workspace) is still one target.
     twice = TargetMap(
