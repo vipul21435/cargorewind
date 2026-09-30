@@ -10,6 +10,7 @@ from cargorewind.flip import (
     StageTests,
     apply_reruns,
     assign_ids,
+    changed_outcomes,
     compute_flip,
     parse_reruns,
     rerun_plan,
@@ -233,10 +234,15 @@ def test_parse_reruns_reads_each_segment_with_explicit_statuses() -> None:
         + _segment(4, 0, LIB_RUN, None)
     )
     statuses = parse_reruns(output, ITEMS, 4, TARGETS, timed_out=True)
+    # Round 4 was cut off by the run's own timeout (a) or never started (d): left out.
     assert statuses == {
-        (LIB, "a"): [P, F, Status.TIMEOUT, Status.TIMEOUT],
-        (DOC, "src/lib.rs - d"): [P, Status.COMPILE_ERROR, Status.MISSING, Status.TIMEOUT],
+        (LIB, "a"): [P, F, Status.TIMEOUT],
+        (DOC, "src/lib.rs - d"): [P, Status.COMPILE_ERROR, Status.MISSING],
     }
+    # A script that ended without being stopped: what it did not reach is missing.
+    ended = parse_reruns(output, ITEMS, 4, TARGETS)
+    assert ended[(LIB, "a")] == [P, F, Status.TIMEOUT, Status.TIMEOUT]
+    assert ended[(DOC, "src/lib.rs - d")][-1] == Status.MISSING
     clean = parse_reruns(_segment(1, 0, LIB_RUN + "running 0 tests\n"), ITEMS[:1], 1, TARGETS)
     assert clean == {(LIB, "a"): [Status.MISSING]}
     assert parse_reruns("", ITEMS[:1], 2, TARGETS) == {(LIB, "a"): [Status.MISSING] * 2}
@@ -372,3 +378,64 @@ def test_old_cargo_reruns_a_test_of_tests_named_after_the_crate_in_its_own_binar
     # missing from every round, which made it flaky and emptied FAIL_TO_PASS.
     lib_only = parse_reruns(_segment(1, 0, sections["old-rerun"], 0), [new], 1, targets)
     assert lib_only == {new.key: [Status.MISSING]}
+
+
+def _six_and_one() -> tuple[dict[str, StageTests], Flip, list[Rerun]]:
+    """One FAIL_TO_PASS and six PASS_TO_PASS lib tests, and the after stage's reruns."""
+    names = [f"tests::old{i}" for i in range(6)]
+    targets = TargetMap([Target("lib", "demo", "src/lib.rs")])
+
+    def run(new: str) -> RunResult:
+        lines = [f"test {name} ... ok" for name in names] + [f"test tests::new ... {new}"]
+        return RunResult(0, LIB_RUN + "\n".join(lines) + "\n")
+
+    stages = {
+        "base": stage_tests("base", run("ok"), targets),
+        "before": stage_tests("before", run("FAILED"), targets),
+        "after": stage_tests("after", run("ok"), targets),
+    }
+    stages["base"].results = {k: v for k, v in stages["base"].results.items() if k[1] in names}
+    flip = compute_flip(stages["base"], stages["before"], stages["after"])
+    assert flip.fail_to_pass == ["tests::new"] and len(flip.pass_to_pass) == 6
+    plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
+    return stages, flip, plan["after"]
+
+
+def test_reruns_that_the_run_timeout_stopped_do_not_make_tests_flaky() -> None:
+    # The rerun run hit --timeout after round 1: rounds 2 and 3 never started.
+    stages, flip, _ = _six_and_one()
+    targets = TargetMap([Target("lib", "demo", "src/lib.rs")])
+    plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
+    reruns = {}
+    for name, items in plan.items():
+        output = ""
+        for index, item in enumerate(items):
+            word = {P: "ok", F: "FAILED"}[stages[name].status(item.key)]
+            output += _segment(1, index, LIB_RUN + f"test {item.raw} ... {word}\n")
+        reruns[name] = parse_reruns(output, items, 3, targets, timed_out=True)
+    assert all(seen == [stages[n].status(k)] for n in reruns for k, seen in reruns[n].items())
+    final = apply_reruns(flip, stages, reruns)
+    assert final.fail_to_pass == ["tests::new"] and len(final.pass_to_pass) == 6
+    assert final.flaky == [] and final.verified
+    assert final.reruns["tests::new"] == {"before": [F], "after": [P]}
+
+
+def test_a_rerun_whose_build_outlasts_the_test_timeout_is_left_out() -> None:
+    # Each rerun container recompiles the patched crate inside the first command's
+    # per-test timeout; a command stopped there never reached its test.
+    stages, flip, items = _six_and_one()
+    targets = TargetMap([Target("lib", "demo", "src/lib.rs")])
+    building = "   Compiling demo v0.1.0 (/home/rewind/repo)\n"
+    output = _segment(1, 0, building, 124)
+    for round_ in (1, 2, 3):
+        for index, item in enumerate(items):
+            if (round_, index) != (1, 0):
+                output += _segment(round_, index, LIB_RUN + f"test {item.raw} ... ok\n")
+    seen = parse_reruns(output, items, 3, targets)
+    assert seen[items[0].key] == [P, P] and all(len(v) == 3 for v in list(seen.values())[1:])
+    assert changed_outcomes(stages["after"], seen) == 0
+    final = apply_reruns(flip, stages, {"after": seen})
+    assert final.flaky == [] and final.verified
+    # A test that hangs once its binary runs is still a timeout, and still flaky.
+    hung = _segment(1, 0, LIB_RUN + f"test {items[0].raw} ... ", 124)
+    assert parse_reruns(hung, items[:1], 1, targets) == {items[0].key: [Status.TIMEOUT]}

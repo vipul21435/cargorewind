@@ -8,7 +8,9 @@ Each FAIL_TO_PASS and PASS_TO_PASS candidate is then rerun by exact name, N time
 the stages that decided it: after (it must pass), before (when the before run built and
 reported it), and base (for a PASS_TO_PASS test that only the base run reported). A test
 whose outcome changes between its stage run and any rerun is flaky: it leaves both
-lists, and the reason lists the outcomes.
+lists, and the reason lists the outcomes. A round that never got to run the test (the
+rerun run hit its timeout first, or the command's per-test timeout ran out while cargo
+was still building) is left out of that comparison instead of counting as a change.
 """
 
 from __future__ import annotations
@@ -221,14 +223,19 @@ def _segments(output: str) -> dict[tuple[int, int], tuple[str, int | None]]:
 
 def _rerun_status(
     segment: tuple[str, int | None] | None, item: Rerun, targets: TargetMap, timed_out: bool
-) -> Status:
+) -> Status | None:
+    """The outcome of one rerun command, or None when it never got to run the test."""
     if segment is None:  # never started: the whole run was stopped (or never ran)
-        return Status.TIMEOUT if timed_out else Status.MISSING
+        return None if timed_out else Status.MISSING
     text, code = segment
     stopped = code is None or code in TIMEOUT_EXIT_CODES
-    for result in parse_libtest(text, timed_out=stopped).results:
+    parsed = parse_libtest(text, timed_out=stopped)
+    for result in parsed.results:
         if result.raw == item.raw and targets.resolve(result.suite) == item.key[0]:
             return result.status
+    cut_off = code is None and timed_out  # the run's own timeout stopped this command
+    if cut_off or (stopped and not parsed.started):
+        return None  # it never reached the test: cut off, or still building when stopped
     if stopped:
         return Status.TIMEOUT
     if compile_failed(text, code or 0):
@@ -239,14 +246,28 @@ def _rerun_status(
 def parse_reruns(
     output: str, items: list[Rerun], rounds: int, targets: TargetMap, *, timed_out: bool = False
 ) -> dict[TestKey, list[Status]]:
-    """The status of each test in each round of a rerun script's output."""
+    """The status of each test in each round of a rerun script's output.
+
+    A round that never got to run the test is left out, so a list can be shorter than
+    ``rounds``: the round never started or was cut off because the whole run hit its
+    timeout (``timed_out``), or its command reached the per-test timeout before any test
+    binary started (cargo was still building). Such a round says nothing about the test,
+    so it cannot make the test flaky.
+    """
     segments = _segments(output)
     statuses: dict[TestKey, list[Status]] = {item.key: [] for item in items}
     for round_ in range(1, rounds + 1):
         for index, item in enumerate(items):
             segment = segments.get((round_, index))
-            statuses[item.key].append(_rerun_status(segment, item, targets, timed_out))
+            status = _rerun_status(segment, item, targets, timed_out)
+            if status is not None:
+                statuses[item.key].append(status)
     return statuses
+
+
+def changed_outcomes(stage: StageTests, statuses: dict[TestKey, list[Status]]) -> int:
+    """How many tests had a rerun outcome other than their stage run's."""
+    return sum(1 for key, seen in statuses.items() if any(s != stage.status(key) for s in seen))
 
 
 def apply_reruns(

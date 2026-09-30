@@ -246,8 +246,12 @@ table.
   `ignored`, `compile-error` (the command showed a build error and no binary
   started), `timeout` or `missing` (the run finished without reporting the test). A
   candidate whose outcome differs between its stage run and any rerun is flaky: it
-  leaves both lists and `task.json` records the reason with every outcome. The flip
-  stays verified when a FAIL_TO_PASS test remains.
+  leaves both lists and `task.json` records the reason with every outcome. A round
+  that never reached its test (the rerun run hit `--timeout` first, or the command's
+  `--test-timeout` ran out while cargo was still building) says nothing about the
+  test: it is left out of the comparison and logged, so the test's `reruns` list in
+  `task.json` is shorter than `rounds`. The flip stays verified when a FAIL_TO_PASS
+  test remains.
 - **Flip rules.** When the before run fails to compile, the base run decides whether
   an existing test counts as PASS_TO_PASS instead of inflating FAIL_TO_PASS.
   Regressions block verification.
@@ -1170,14 +1174,14 @@ flowchart LR
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 656 passed, 6 Docker tests deselected | `make cov` |
-| Line and branch coverage of `src/` | 98.82% (gate: 90%) | `make cov` |
+| Tests (no Docker) | 660 passed, 6 Docker tests deselected | `make cov` |
+| Line and branch coverage of `src/` | 98.83% (gate: 90%) | `make cov` |
 | Bundle schema, verify and batch tests (plus 3 CLI tests) | 59 passed | `uv run pytest tests/test_bundle.py tests/test_verify.py tests/test_batch.py` |
 | Offline batch of `examples/batch.toml` (2 replayed rewinds, 1 duplicate), fresh work directory | 1.82 s wall (median of 3) | `rm -rf .cargorewind out/batch && time make batch-demo` |
 | Offline verify of the demo bundle | 0.50 s wall (median of 3) | `time uv run cargorewind verify out/demo --replay examples/strsim/transcript.json` after `make demo` |
 | Live batch of `examples/batch.toml` through Docker, images cached by label | 3 min 42 s wall: strsim-rs 24.5 s, semver 197.4 s (pin loop included), duplicate 0 s; 2 verified, 1 duplicate | `time uv run cargorewind batch examples/batch.toml --live --out out/batch-live --cache-dir <dir>` (numbers from `summary.md`) |
 | First live semver `d92a4d8` rewind (toolchain stage and `rust:1.68.0-slim` present, final image built) | 6 min 0 s wall; FAIL_TO_PASS 1, PASS_TO_PASS 34, 1 pin | `time uv run cargorewind rewind examples/semver/semver.bundle --fix d92a4d8 --registry --cache-dir <dir> --record <file>` |
-| libtest parser, target resolution, flip and rerun tests | 62 passed (9 recorded runs of the zoo crate on 3 toolchains, 1 rust 1.39.0 recording of a shared binary name) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
+| libtest parser, target resolution, flip and rerun tests | 64 passed (9 recorded runs of the zoo crate on 3 toolchains, 1 rust 1.39.0 recording of a shared binary name) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
 | Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
 | One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:edcbd61bae401cff sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
 | Recipe, golden Dockerfile, probe and build cache tests | 75 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
@@ -1266,7 +1270,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   failures before the fix is as suspicious as a failure among passes after it), and
   the reason lists every outcome so the reader can judge. Statuses that describe the
   run rather than the test (`compile-error`, `timeout`, `missing`) count as changes
-  too, because a verifier could not rely on that test either.
+  too, because a verifier could not rely on that test either. A round that never got
+  to run the test is the exception: it is left out rather than called a change,
+  because it tells nothing about the test.
 - **Pins first, floors second, every step explained.** The toolchain file is what
   the developers ran, and the date rule is the best guess when there is none. A pin
   below `rust-version` or the edition minimum cannot build (cargo refuses it), so a
@@ -1365,9 +1371,22 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 - The stage runs still run the whole suite with `cargo test --no-fail-fast`; only
   the reruns select tests. Each rerun is one cargo invocation, so a suite of
   thousands of tests spends minutes in reruns (about 7 ms per test and round on a
-  warm build, plus one doctest compilation per doctest rerun); `--reruns 0` skips
-  them. The three rounds of a stage share one container, so a test that leaves state
-  behind sees it in the next round.
+  warm build); `--reruns 0` skips them. Doctests cost more: a doctest filter is a
+  substring, so a rerun compiles and runs every doctest whose name contains its item
+  path (the 30 doctest reruns of each strsim-rs rerun stage ran 54 doctests), and a
+  doctest of the crate's own docs is filtered by its file path, which matches every
+  doctest in that file. The three rounds of a stage share one container, so a test
+  that leaves state behind sees it in the next round.
+- The rerun time is not budgeted in advance. All rounds of a stage run in one
+  container bounded by `--timeout` (default 3600 s), and rounds x candidates
+  commands, each allowed `--test-timeout` (default 300 s), can need more. Rounds the
+  stop keeps from running are left out of the flaky check and logged
+  (`N of M rerun(s) did not run their test`), so those tests were rerun fewer times
+  than `--reruns` asks; the stage's rerun entry in `task.json` then has `timed_out`
+  true. The first command for each target also recompiles the patched crate inside
+  its own `--test-timeout`; a command stopped before any test binary started is left
+  out the same way, so a crate whose patched build outlasts `--test-timeout` gets
+  fewer reruns (raise `--test-timeout` for such crates).
 - The JSON format is requested only for nightly channels installed with rustup; the
   parser accepts it in any run, but stable toolchains get the text format. The JSON
   fixtures were recorded on stable images with `RUSTC_BOOTSTRAP=1`, not on a nightly.

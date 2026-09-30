@@ -50,6 +50,7 @@ from cargorewind.flip import (
     StageTests,
     TestKey,
     apply_reruns,
+    changed_outcomes,
     compute_flip,
     parse_reruns,
     rerun_plan,
@@ -427,14 +428,19 @@ def rerun_candidates(
             result.output, items, rounds, rt.targets, timed_out=result.timed_out
         )
         seen[stage] = statuses
-        changed = sum(
-            1 for item in items if set(statuses[item.key]) != {stages[stage].status(item.key)}
-        )
+        changed = changed_outcomes(stages[stage], statuses)
         state.reruns[stage] = RerunRun(stage, result, items, changed)
         rt.log(
             f"rerun     {stage:<6} exit {result.exit_code:>3}  {rounds} x "
             f"{len(items)} test(s) by exact name, {changed} changed outcome"
         )
+        unfinished = rounds * len(items) - sum(len(s) for s in statuses.values())
+        if unfinished:
+            why = "the run hit --timeout" if result.timed_out else "still building"
+            rt.log(
+                f"rerun     {stage:<6} {unfinished} of {rounds * len(items)} rerun(s) did not "
+                f"run their test ({why}); they are left out of the flaky check"
+            )
     final = apply_reruns(flip, stages, seen)
     for flaky in final.flaky:
         rt.log(f"flaky     {flaky.id}: {flaky.reason}")

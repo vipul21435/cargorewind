@@ -870,3 +870,68 @@ def test_the_rerun_command_of_every_test_row_is_shell_quoted(tmp_path: Path) -> 
         )
         assert echoed.stdout.splitlines() == list(argv[1:])
     assert list(tmp_path.iterdir()) == []  # nothing was redirected into a file
+
+
+class StoppedReruns(ScriptedBackend):
+    """The after stage's rerun run hits --timeout when round 2 is about to start."""
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        result = super().run_script(tag, run, overlay, script)
+        if run != "rerun-after":
+            return result
+        index = next(i for i, ln in enumerate(script.splitlines()) if "tests::two" in ln) // 2
+        cut = result.output.index(f"--- cargorewind: rerun 2 {index} ---")
+        return RunResult(124, result.output[:cut], timed_out=True)
+
+
+def test_reruns_the_run_timeout_stopped_are_left_out_of_the_flaky_check(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+    lines: list[str] = []
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", base=base)
+    report = rewind(options, SubprocessRunner(), StoppedReruns(PASSING), lines.append)
+    assert report.flip is not None and report.flip.verified and report.flip.flaky == []
+    task = json.loads((out / "task.json").read_text())
+    assert task["FAIL_TO_PASS"] == ["tests::two"] and task["PASS_TO_PASS"] == ["tests::zero"]
+    assert task["reruns"]["stages"]["after"]["timed_out"] is True
+    assert task["reruns"]["stages"]["after"]["changed"] == 0
+    assert task["tests"]["tests::two"]["reruns"] == {
+        "before": ["failed"] * 3,
+        "after": ["passed"],  # rounds 2 and 3 never started
+    }
+    assert (
+        "rerun     after  4 of 6 rerun(s) did not run their test (the run hit --timeout); "
+        "they are left out of the flaky check"
+    ) in lines
+
+
+class SlowBuild(ScriptedBackend):
+    """The first after rerun spends its whole --test-timeout compiling."""
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        result = super().run_script(tag, run, overlay, script)
+        if run != "rerun-after":
+            return result
+        _, rest = result.output.split("--- cargorewind: rerun 1 1 ---", 1)
+        building = "--- cargorewind: rerun 1 0 ---\n   Compiling demo v0.1.0\n"
+        stopped = building + "--- cargorewind: exit 124 ---\n"
+        return RunResult(0, stopped + "--- cargorewind: rerun 1 1 ---" + rest)
+
+
+def test_a_rerun_still_building_at_its_test_timeout_is_left_out(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+    lines: list[str] = []
+    options = RewindOptions(str(repo.path), fix, tmp_path / "out", tmp_path / "work", base=base)
+    report = rewind(options, SubprocessRunner(), SlowBuild(PASSING), lines.append)
+    assert report.flip is not None and report.flip.verified and report.flip.flaky == []
+    assert report.flip.reruns["tests::two"]["after"] == [Status.PASSED] * 2
+    assert (
+        "rerun     after  1 of 6 rerun(s) did not run their test (still building); "
+        "they are left out of the flaky check"
+    ) in lines
