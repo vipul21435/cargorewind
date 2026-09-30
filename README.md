@@ -8,7 +8,9 @@ typed Python that drives git, cargo and Docker. cargo only ever runs inside cont
 so the host needs git and Docker but no Rust toolchain.
 
 Give it a repository and a fix commit. It exports a benchmark-style task bundle:
-`task.json` with FAIL_TO_PASS and PASS_TO_PASS lists, the environment `Dockerfile`, a
+`task.json` with FAIL_TO_PASS and PASS_TO_PASS lists (each test rerun by exact name,
+flaky ones set aside with a reason, and a per-test table with the command that reruns
+it), the environment `Dockerfile`, a
 `test.patch`, a `fix.patch`, a `split.json` report of how the diff was divided, a
 `toolchain.json` report of how the toolchain was chosen, a `lock.json` report of how
 the dependencies were fixed (plus the `Cargo.lock` it wrote when the commit had none),
@@ -21,7 +23,8 @@ run.
 - **One command, end to end.** `cargorewind rewind <repo> --fix <sha>` clones (or
   fetches) a URL, a local path or a git bundle. It resolves the base commit (by default
   the fix's first parent), splits the diff, picks the toolchain, builds the
-  environment, runs the suite three times and writes the bundle.
+  environment, runs the suite three times, reruns every candidate test by exact name
+  and writes the bundle.
 - **Rust-aware test and fix patch split.** Every changed file gets a Cargo layout
   role: `test`, `source`, `bench`, `example`, `build-script`, `manifest`, `lockfile` or
   `other`. Packages come from every `Cargo.toml`, workspace membership from
@@ -186,11 +189,52 @@ run.
   fix patches). Each run streams its changed files into
   `docker run --network none` as a tar on stdin, so it needs no bind mounts and no git
   or `patch` inside the old image.
-- **libtest text parser and flip rules.** Handles `ok`, `FAILED`, `ignored`,
-  `should panic` and bench lines. Doctest names get a per-item ordinal instead of the
-  line number, so they stay stable when a patch shifts lines. When the before run fails
-  to compile, the base run decides whether an existing test counts as PASS_TO_PASS
-  instead of inflating FAIL_TO_PASS. Regressions block verification.
+- **libtest parser for both formats, per test binary.** One pass reads the text
+  format every toolchain prints and the JSON format (`-- -Z unstable-options --format
+  json`, requested automatically on nightly channels), and follows cargo's `Running`
+  and `Doc-tests` lines to know which binary a result belongs to (the old
+  `Running target/debug/deps/x-<hash>` and the newer `Running unittests src/lib.rs
+  (...)`, `Running tests/it.rs (...)`). It handles `ok`, `FAILED`, `ignored` with or
+  without a reason, `should panic`, `compile fail` and `compile` suffixes (display
+  only, stripped so names match `--exact`), bench lines, `<0.1s>` report times,
+  `running N tests` and `test result:` summaries. Output of the tests themselves does
+  not confuse it: with `--nocapture` or `--test-threads=1` libtest prints
+  `test name ... ` first and the status after the test's output, and a panic in a
+  spawned thread can land in the middle of a result line; such a line stays pending
+  until a line that is only a status. A test that started and never reported failed
+  (the binary died) or timed out (the run was stopped). Doctest names get a per-item
+  ordinal instead of the line number, so they stay stable when a patch shifts lines.
+  The fixtures are real `cargo test` outputs of an original crate that produces every
+  one of those lines (`tests/fixtures/libtest/zoo`), recorded on rust 1.39.0, 1.73.0
+  and 1.98.1 in text, `--nocapture --test-threads=1` and JSON form; all nine
+  recordings parse to the same 21 results.
+- **Tests keyed by cargo target.** Each test binary is mapped to its target through
+  the layout of the fix and base commits: the library (`--lib`), a binary
+  (`--bin name`), an integration test (`--test name`), a bench, an example, or the
+  doctests (`--doc`); targets the layout does not list are recognised by their source
+  path, and old cargo output (binary name only) falls back to kind order, with an
+  `unknown` target as the last resort. A test's id is its name, qualified as
+  `name [test it]` only when two targets have a test of that name, so the strsim-rs
+  task keeps the plain names. `task.json` lists every test with its target, its
+  status in each run and the command that reruns it.
+- **Reruns by exact name and flaky detection.** Every FAIL_TO_PASS and PASS_TO_PASS
+  candidate is rerun with `cargo test --lib|--test <name>|--bin <name> -- --exact
+  <test>` three times (`--reruns`, 0 turns it off) in the stages that decided it:
+  `after` for all, `before` for the tests that run reported, `base` for a
+  PASS_TO_PASS test whose verdict came from the base run because `before` did not
+  build. Doctests are the exception: rustdoc splits its test arguments on whitespace,
+  so a doctest name cannot be passed whole; they are rerun with their item path as the
+  filter (`cargo test --doc -- hamming`) and the exact name is picked from the output.
+  Each command runs under a per-test `timeout` (`--test-timeout`, default 300 s) in
+  one container per stage, and every outcome is explicit: `passed`, `failed`,
+  `ignored`, `compile-error` (the command showed a build error and no binary
+  started), `timeout` or `missing` (the run finished without reporting the test). A
+  candidate whose outcome differs between its stage run and any rerun is flaky: it
+  leaves both lists and `task.json` records the reason with every outcome. The flip
+  stays verified when a FAIL_TO_PASS test remains.
+- **Flip rules.** When the before run fails to compile, the base run decides whether
+  an existing test counts as PASS_TO_PASS instead of inflating FAIL_TO_PASS.
+  Regressions block verification.
 - **Record and replay.** `--record` writes a transcript of the Docker builds, test runs
   and pin-loop session steps. `--replay` answers from that transcript offline, but only
   when the Dockerfile, every file overlay, every stage script (with its probe words)
@@ -228,6 +272,7 @@ cargorewind rewind <git-url | path | bundle> --fix <sha> [--base <sha>] [--out o
     [--registry | --offline] [--cache-dir ~/.cache/cargorewind]
     [--vendor] [--index-dir <recorded index>]
     [--build-cache | --no-build-cache] [--rebuild]
+    [--reruns 3] [--test-timeout 300]
     [--record transcript.json | --replay transcript.json] [--timeout 3600]
 cargorewind cache list [--cache-dir ~/.cache/cargorewind]
 cargorewind cache prune [--cache-dir ~/.cache/cargorewind]
@@ -277,10 +322,13 @@ run       base   exit   0  102 passed, 0 failed, 0 ignored
 run       before exit 101  102 passed, 2 failed, 0 ignored
 run       after  exit   0  104 passed, 0 failed, 0 ignored
 probe     in Docker: build passed, before passed, after passed
+rerun     before exit   0  3 x 104 test(s) by exact name, 0 changed outcome
+rerun     after  exit   0  3 x 104 test(s) by exact name, 0 changed outcome
 FAIL_TO_PASS  2
   tests::jaro_same_one_character
   tests::jaro_winkler_same_one_character
 PASS_TO_PASS  102
+reruns        3 x by exact name (104 in before, 104 in after)
 probes        2 identifier(s) passed
 verdict       VERIFIED fail-to-pass flip
 bundle        out/demo/ (task.json, split.json, toolchain.json, lock.json, probes.json, recipe.json, Dockerfile, patches, logs/)
@@ -289,7 +337,8 @@ bundle        out/demo/ (task.json, split.json, toolchain.json, lock.json, probe
 The live run (`make demo-live`) prints the same lines without the `mode` line. In a
 replay, the `probe     in Docker` line reports the recorded run: the transcript holds
 the sha256 of each stage script, probe words included, so a replay with other probes
-is refused. An excerpt of the exported `out/demo/task.json`:
+is refused; the rerun scripts are recorded and checked the same way. An excerpt of the
+exported `out/demo/task.json`:
 
 ```json
 {
@@ -321,12 +370,29 @@ is refused. An excerpt of the exported `out/demo/task.json`:
              "ok": true, "report": "probes.json"},
   "split": {"test_files": ["src/lib.rs"], "fix_files": ["CHANGELOG.md", "src/lib.rs"],
             "shared_files": ["src/lib.rs"], "report": "split.json", "...": "..."},
-  "runs": {"before": {"exit_code": 101, "timed_out": false, "passed": 102, "failed": 2,
-                      "ignored": 0}, "...": "..."},
+  "runs": {"before": {"exit_code": 101, "timed_out": false, "state": "ran", "passed": 102,
+                      "failed": 2, "ignored": 0}, "...": "..."},
+  "reruns": {"rounds": 3, "test_timeout": 300,
+             "stages": {"before": {"tests": 104, "exit_code": 0, "timed_out": false,
+                                   "changed": 0, "log": "logs/rerun-before.log"},
+                        "after": {"...": "..."}}},
+  "tests": {"tests::jaro_same_one_character": {
+                "target": "lib strsim", "name": "tests::jaro_same_one_character",
+                "command": "cargo test --lib -- --exact tests::jaro_same_one_character",
+                "base": "missing", "before": "failed", "after": "passed",
+                "reruns": {"before": ["failed", "failed", "failed"],
+                           "after": ["passed", "passed", "passed"]}},
+            "src/lib.rs - hamming": {"target": "doc strsim", "command": "cargo test --doc -- hamming",
+                                     "...": "..."},
+            "hamming_works": {"target": "test lib",
+                              "command": "cargo test --test lib -- --exact hamming_works",
+                              "...": "..."},
+            "...": "...104 tests..."},
   "FAIL_TO_PASS": ["tests::jaro_same_one_character", "tests::jaro_winkler_same_one_character"],
   "PASS_TO_PASS": ["damerau_levenshtein_works", "hamming_works", "...102 names..."],
   "regressions": [],
   "still_failing": [],
+  "flaky": [],
   "verified": true
 }
 ```
@@ -417,6 +483,64 @@ so the prune reclaimed 0 B. Lock contention is tested with a fake runner: while 
 run builds a recipe, a second run of the same recipe logs
 `cache     waiting for another run that builds recipe <hash>`, then reuses the image;
 `backend.build` runs once.
+
+### Reruns by exact name and flaky tests
+
+After the three runs, every candidate is rerun by exact name in its own cargo
+invocation, three times per stage, in a fresh container of that stage. The head of
+`out/demo/logs/rerun-before.log` from the live run above (the new test must keep
+failing before the fix):
+
+```text
+--- cargorewind: rerun 1 0 ---
+   Compiling strsim v0.9.2 (/home/rewind/repo)
+    Finished dev [unoptimized + debuginfo] target(s) in 0.61s
+     Running /home/rewind/target/debug/deps/strsim-a4121e5696016f65
+
+running 1 test
+test tests::jaro_same_one_character ... FAILED
+```
+
+The 104 tests of strsim-rs live in three targets (86 in the library, 8 in
+`tests/lib.rs`, 10 doctests), so the reruns use `--lib`, `--test lib` and `--doc`.
+Rust 1.39.0 prints only the binary name, `strsim-<hash>`, and the layout maps it to
+the library. The live run with reruns took 21.1 s wall against 4.2 s without
+(`--reruns 0`), both with a warm image: 624 `cargo test` invocations, two container
+starts and two recompilations of the patched file for about 17 s.
+
+A flaky test is one whose outcome changes. With the fake backend of the unit tests, a
+test that fails in the second rerun of the after stage and one that is ignored in the
+third rerun of the before stage leave the lists like this (`task.json`):
+
+```json
+"flaky": [
+  {"id": "tests::two", "reason": "outcome changed between the stage run and its reruns: after passed, passed, failed, passed"},
+  {"id": "tests::zero", "reason": "outcome changed between the stage run and its reruns: before passed, passed, passed, ignored"}
+]
+```
+
+and the verdict is NOT VERIFIED, because no FAIL_TO_PASS test remained. The three
+Docker runs of the demo and the which-rs e2e run found no flaky test (0 changed
+outcome in every rerun line).
+
+The parser fixtures are recordings of `tests/fixtures/libtest/zoo`, a crate written
+for this purpose: passing, failing, ignored (with and without a reason), should-panic,
+noisy and Err-returning tests, a panic in a spawned thread, a test in a bin target,
+two integration test binaries (one sharing a test name with the library) and doctests
+of every kind (`should_panic`, `compile_fail`, `no_run`, `ignore`, one that fails).
+`record.sh` runs it in a toolchain image and captures the text run, the
+`--nocapture --test-threads=1` run, the JSON run, four exact-name runs and a compile
+error. On rust 1.39.0, the panic of the spawned thread lands inside a result line:
+
+```text
+thread '<unnamed>' panicked at 'inner thread panic', src/lib.rs:84:test tests::should_panic_but_does_not ... 44
+FAILED
+```
+
+and the parser still reads `tests::should_panic_but_does_not` as failed. The same
+recordings show that `cargo test --doc -- --exact "src/lib.rs - add (line 7)"` runs
+0 tests on all three toolchains (rustdoc splits the arguments on whitespace), which
+is why doctests are rerun by item path.
 
 ### The split on its own
 
@@ -666,8 +790,11 @@ build     cargorewind/which-rs:ed8bcdbbfe90617e (cache hit: image cargorewind/wh
 run       base   exit   0  19 passed, 0 failed, 0 ignored
 run       before exit   0  19 passed, 0 failed, 0 ignored
 run       after  exit   0  19 passed, 0 failed, 0 ignored
+rerun     before exit   0  3 x 19 test(s) by exact name, 0 changed outcome
+rerun     after  exit   0  3 x 19 test(s) by exact name, 0 changed outcome
 FAIL_TO_PASS  0
 PASS_TO_PASS  19
+reruns        3 x by exact name (19 in before, 19 in after)
 probes        none (no new identifier to probe)
 verdict       NOT VERIFIED fail-to-pass flip
 bundle        out/which-live/ (task.json, split.json, toolchain.json, lock.json, Cargo.lock, probes.json, recipe.json, Dockerfile, patches, logs/)
@@ -676,7 +803,9 @@ bundle        out/which-live/ (task.json, split.json, toolchain.json, lock.json,
 This fix commit changes no test and adds no new name, so there is no flip to verify
 and nothing to probe (exit 2); the run shows
 that the bounded environment builds and its 19 tests (16 in `tests/basic.rs`, 3
-doctests) pass with `--offline` under `--network none`. The dependency part of its
+doctests, one of them in the crate's own docs, named `src/lib.rs - (crate)`) pass
+with `--offline` under `--network none`, in the stage runs and in 3 x 19 reruns per
+stage (10.9 s wall with the image cached). The dependency part of its
 `Dockerfile`:
 
 ```dockerfile
@@ -740,9 +869,12 @@ flowchart LR
     OV --> BE
     BE -->|DockerBackend| RUN["docker build, then 3 x docker run --network none"]
     BE -->|ReplayBackend| REC["recorded transcript, digests checked"]
-    RUN --> LT["libtest parser and flip rules"]
+    RUN --> LT["libtest: text and JSON parser, per binary"]
     REC --> LT
-    LT --> OUT["task.json, toolchain.json, lock.json, probes.json, recipe.json, Dockerfile, patches, logs"]
+    LT --> TT["testtargets: binary to cargo target, rerun commands"]
+    TT --> FL["flip: ids, FAIL_TO_PASS and PASS_TO_PASS, rerun scripts, flaky tests"]
+    FL -->|rerun scripts| BE
+    FL --> OUT["task.json, toolchain.json, lock.json, probes.json, recipe.json, Dockerfile, patches, logs"]
 ```
 
 | Module | Role |
@@ -766,38 +898,46 @@ flowchart LR
 | `probes.py` | definitions on added lines, probe choice, host checks, `probes.json` |
 | `buildcache.py` | recipe-hash image index, per-recipe `flock`, reuse by label, prune |
 | `backend.py` | Docker, recording and replay backends; sessions; stage scripts with probes |
-| `libtest.py` | libtest text parser and the three-run flip classification |
-| `rewind.py` | the pipeline and the `task.json` document |
+| `libtest.py` | libtest text and JSON parser: results per binary, stable doctest names, statuses |
+| `testtargets.py` | binaries to cargo targets through the layout; the exact-name rerun command |
+| `flip.py` | test ids, the three-run flip classification, rerun scripts and their parsing, flaky tests |
+| `rewind.py` | the pipeline, the reruns and the `task.json` document |
 | `cli.py` | Typer CLI: `split`, `toolchain`, `lock`, `rewind`, `cache`, `doctor`, `version` |
 
 ## Measured
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 491 passed, 4 Docker tests deselected | `make cov` |
-| Line and branch coverage of `src/` | 98.88% (gate: 90%) | `make cov` |
+| Tests (no Docker) | 564 passed, 4 Docker tests deselected | `make cov` |
+| Line and branch coverage of `src/` | 98.92% (gate: 90%) | `make cov` |
+| libtest parser, target resolution, flip and rerun tests | 58 passed (9 recorded runs of 3 toolchains) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
+| Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
+| One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:d56b85f51c7a8dc2 sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
 | Recipe, golden Dockerfile, probe and build cache tests | 65 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
 | Dependency tests (semver, lockfile, index, pin loop, lock stage) | 100 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
 | Toolchain and registry tests | 90 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |
 | Lexer, scanner, layout and split tests (with the regression suite) | 159 passed | `uv run pytest tests/test_rustlex.py tests/test_rustscan.py tests/test_layout.py tests/test_patchsplit.py tests/test_splitreport.py tests/test_split_regressions.py` |
 | Offline split of the demo fix, fresh work directory | 0.40 s wall (median of 3) | `rm -rf .cargorewind out && time make split-demo` |
 | Scanner speed on strsim-rs `src/lib.rs` (873 lines) | 7.5 ms per file (3.3 MB/s) | mean of 20 `scan_source` calls (see the note below the table) |
-| Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs; cache reuse by label; build stopped by the probe) | 4 passed, 19.7 s with a warm Docker cache | `time make e2e` |
+| Live Docker e2e tests (strsim-rs flip; which-rs pin loop, vendored build, offline runs; cache reuse by label; build stopped by the probe), each rewind with 3 reruns | 4 passed, 87 s with a warm Docker cache (19.7 s before the reruns) | `time make e2e` |
 | Live e2e on GitHub Actions (amd64: the four e2e tests, image pulls, pin loop, vendored build) | 51 s step time | CI run [36650143288](https://github.com/vipul21435/cargorewind/actions/runs/36650143288), step "Live end-to-end runs through Docker" |
 | strsim-rs environment rebuilt with `--rebuild` (`docker build --no-cache`, base image present) | 2.4 s build | `cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --cache-dir <dir> --rebuild` (see "Sanity probes and the build cache") |
-| Offline demo, fresh work directory | 0.56 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
+| Offline demo, fresh work directory | 0.70 s wall (median of 3) | `rm -rf .cargorewind out && time make demo` |
 | Offline toolchain inference of the demo fix, fresh work directory | 0.21 s wall (median of 3) | `rm -rf .cargorewind out && time make toolchain-demo` |
 | Offline replay of the which-rs pin loop, fresh work directory | 0.25 s wall (median of 3) | `rm -rf .cargorewind out && time make lock-demo` |
 | First live pin loop on which-rs `e776ff0`, including the rust:1.73.0-slim pull | 2 min 4 s wall; 41 crates.io packages, 32 late, 16 pins in 4 rounds | `time uv run cargorewind lock <which-rs clone> e776ff0 --registry --cache-dir <dir>` |
-| Live vendored rewind of which-rs `e776ff0` (toolchain stage cached, final stage built) | 19.2 s wall; 27 crates vendored, 19 tests pass offline in all 3 runs | `time uv run cargorewind rewind <which-rs clone> --fix e776ff0 --vendor --registry --cache-dir <dir>` |
+| Live vendored rewind of which-rs `e776ff0` (toolchain stage cached, final stage built) | 19.2 s wall; 27 crates vendored, 19 tests pass offline in all 3 runs | `time uv run cargorewind rewind <which-rs clone> --fix e776ff0 --vendor --registry --cache-dir <dir>` (before slice 5, no reruns) |
+| The same rewind with the image cached, 3 x 19 reruns in 2 stages | 10.9 s wall, 0 changed outcome | `time uv run cargorewind rewind examples/which-rs/which-rs.bundle --fix e776ff0 --vendor --index-dir examples/which-rs/index --cache-dir <dir>` |
 | Committed-lockfile check of which-rs `17fde4a`, including the clone | 1.85 s wall | `time uv run cargorewind lock https://github.com/harryfei/which-rs 17fde4a` |
 | Toolchain inference of bevy_cli `e19ba4e568` with live registry lookup, fresh clone | 4.17 s wall | `time uv run cargorewind toolchain https://github.com/TheBevyFlock/bevy_cli e19ba4e568 --registry --cache-dir <dir>` |
 | Dated nightly Dockerfile (`nightly-2020-01-01` + rustfmt), including the rust:1.98.1-slim pull | 2 min 7 s build | `time docker build` of the rendered Dockerfile (see "Toolchain inference") |
 | First live run, including the rust:1.39.0-slim pull | 1 min 55 s wall | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/demo-live --record ...` |
-| Demo flip | 2 FAIL_TO_PASS, 102 PASS_TO_PASS | `make demo` |
+| Demo flip | 2 FAIL_TO_PASS, 102 PASS_TO_PASS, 0 flaky after 2 x 3 x 104 reruns | `make demo` |
 | Stable releases in the toolchain table | 140 (1.0.0 to 1.98.1), 41 point releases | `uv run python -c "from cargorewind.toolchain import STABLE_RELEASES as s; print(len(s), sum(not v.endswith('.0') for v, _ in s))"` |
 
 Unless marked as CI, numbers come from an Apple Silicon Mac (8 GB RAM) on 2026-09-30.
+The rerun timing per invocation was measured inside the strsim-rs image with
+`date +%s%N` around ten `cargo test --lib -- --exact` calls of one test.
 The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` inside
 `uv run python` and divided the elapsed `time.perf_counter()` by 20.
 
@@ -844,7 +984,21 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   only attributes, `mod` items and balanced delimiters, never full syntax trees.
 - **Stable doctest names.** libtest names doctests by line number, and a fix that adds
   lines above them renames them. Replacing the number with a per-item ordinal keeps
-  PASS_TO_PASS from misreporting shifted doctests as new tests.
+  PASS_TO_PASS from misreporting shifted doctests as new tests. The raw name is kept
+  for the reruns.
+- **One cargo invocation per rerun, and doctests by item.** libtest before 1.5x
+  silently ignores every filter but the first, so batching names would run one test
+  and report the rest as missing on old toolchains; one `cargo test ... -- --exact
+  <name>` per test costs about 7 ms when nothing changed and works everywhere.
+  rustdoc splits its test arguments on whitespace, so doctests are filtered by item
+  path and matched on the exact name in the output. A rerun is a fresh container of
+  the stage, so the three rounds share a container but not the stage run's state.
+- **Flaky means "changed", not "failed".** A test whose outcomes differ between its
+  stage run and any rerun leaves both lists whatever the direction (a pass among
+  failures before the fix is as suspicious as a failure among passes after it), and
+  the reason lists every outcome so the reader can judge. Statuses that describe the
+  run rather than the test (`compile-error`, `timeout`, `missing`) count as changes
+  too, because a verifier could not rely on that test either.
 - **Pins first, floors second, every step explained.** The toolchain file is what
   the developers ran, and the date rule is the best guess when there is none. A pin
   below `rust-version` or the edition minimum cannot build (cargo refuses it), so a
@@ -920,10 +1074,25 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
   listed. Files it cannot reach fall back to path conventions.
 - Every `Cargo.toml` in the tree is read with its own `git show`, so a workspace with
   hundreds of crates spends a few seconds on manifests.
-- The whole suite runs with `cargo test --no-fail-fast`. There is no selection of
-  tests by exact name and no flaky-test detection by reruns. Test names are not
-  qualified by test binary, so a name that appears in two binaries is merged (a
-  failure wins).
+- The stage runs still run the whole suite with `cargo test --no-fail-fast`; only
+  the reruns select tests. Each rerun is one cargo invocation, so a suite of
+  thousands of tests spends minutes in reruns (about 7 ms per test and round on a
+  warm build, plus one doctest compilation per doctest rerun); `--reruns 0` skips
+  them. The three rounds of a stage share one container, so a test that leaves state
+  behind sees it in the next round.
+- The JSON format is requested only for nightly channels installed with rustup; the
+  parser accepts it in any run, but stable toolchains get the text format. The JSON
+  fixtures were recorded on stable images with `RUSTC_BOOTSTRAP=1`, not on a nightly.
+- Two binaries that resolve to the same target (a test target with the crate's name
+  on old cargo, which prints only the binary) are merged, a failure winning. A test
+  that prints a bare `ok` or `FAILED` line under `--nocapture` can resolve a pending
+  result early, and the parser does not know a test binary's own crash from a test
+  failure beyond marking the test that was running as failed.
+- A stage that times out marks every unreported test `timeout`, and a stage that
+  fails to build marks them all `compile-error`; the rules then treat those tests as
+  not run, exactly as an absent test was treated before, so a test that hangs before
+  the fix and passes after it counts as FAIL_TO_PASS only when the before run
+  reported it as failed.
 - Toolchain floors come from the root package, the root workspace's members and the
   root `Cargo.lock` only. Path dependencies outside the workspace are not considered.
   The lockfile floor is the release whose notes introduced the format (v2 1.41, v3
@@ -965,11 +1134,9 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 
 ## Roadmap
 
-Planned in [PLAN.md](PLAN.md), in order:
+Planned in [PLAN.md](PLAN.md):
 
-1. Test selection by exact name, a JSON libtest parser for nightly, and flaky
-   detection by reruns.
-2. A versioned task bundle schema, a `verify` command, batch recipes and a second
+1. A versioned task bundle schema, a `verify` command, batch recipes and a second
    crate with a verified flip in the e2e suite.
 
 ## License
