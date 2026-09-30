@@ -38,7 +38,8 @@ green, pushed, and the README describes it with real output.
   exercises the no-lockfile path.
 - Second e2e candidate (to verify in slice 6): strsim-rs `f6a759324b` "limit common
   prefix in jaro-winkler" (2023-12-31) edits `src/lib.rs` and `tests/lib.rs`, covering
-  the integration-test (tests/) path of the split.
+  the integration-test (tests/) path of the split. Rejected in slice 6 (a regression,
+  see there); dtolnay/semver `d92a4d8` took its place.
 - The offline `make demo` replays a recorded live run: a git bundle of the two demo
   commits (strsim-rs LICENSE kept next to it) and the transcript of real `cargo test`
   output captured from Docker. A separate `make demo-live` performs the same run through
@@ -438,22 +439,55 @@ green, pushed, and the README describes it with real output.
 - `rewind.py` exposes the shared execution (`run_stages`, `rerun_candidates`,
   `execute`, `build_image`, `targets_of`) over an `Execution` protocol that both
   reports implement.
+- `cargorewind batch recipes.toml`: `[[task]]` tables (`repo`, `fix`, optional
+  `base`, `name`, `vendor`, `image`, `index_dir`, `replay`, `reruns`,
+  `test_timeout`) plus `[defaults]`; unknown keys and bad types are errors with the
+  task number. Local paths are relative to the recipes file and spelled relative to
+  the working directory when they lie below it, so logs, `task.json` and the summary
+  hold no absolute home paths.
+- Dedupe key: (repository slug, resolved fix commit), so a short and a full SHA, or a
+  bundle and a URL of one repository, are one task. The key is claimed only by a task
+  that reached a verdict; after an error the next spelling runs. The bundle directory
+  is the task's `name` or `<slug>-<fix12>`; a name held by a task with a verdict is an
+  error of the later task, never an overwrite.
+- Checkouts live under `<workdir>/<slug>-<sha256(source)[:8]>`, not `<slug>`: two
+  repositories with one name (forks) sharing a checkout made the second task fetch
+  the first repository and fail with an unknown commit (found while finishing the
+  stash; regression test added).
+- Errors listed in the CLI's `FAILURES` (a missing transcript included: the batch
+  builds `ReplayBackend` itself instead of the rewind helper that exits) end one task
+  with status `error` and the batch goes on. Exit code: 1 if any error, else 2 if any
+  not verified, else 0. `summary.json` (schema 1) and `summary.md` list name,
+  repository, commits, status, seconds (wall, including the clone), bundle,
+  toolchain, lockfile strategy, list sizes and detail. `--live` drops the replay
+  files.
+- Second crate: dtolnay/semver `d92a4d8` (MIT OR Apache-2.0, bundled under MIT),
+  "Add a dedicated error for parsing Version from empty string", committed
+  2023-03-12. It changes `tests/test_version.rs` (integration test path) and has no
+  Cargo.lock with one optional crates.io dependency, so it is the verified flip with a
+  date-bounded lockfile that slice 3 left open: rust 1.68.0, 7 late crates.io
+  packages, one pin (serde 1.0.229 -> 1.0.155), FAIL_TO_PASS `test_parse`, 34
+  PASS_TO_PASS, 0 flaky in 3 reruns. `rust:1.68.0-slim` joined the offline digest table
+  (the registry's index digest, checked with `docker buildx imagetools inspect`).
+- strsim-rs `f6a759324b` was rejected: a live run (rust 1.75.0; the commit is
+  authored 2023-12-31 but committed 2024-01-05) finds 2 FAIL_TO_PASS tests, but
+  `tests::jaro_winkler_very_long_prefix` passes at base and fails before and after the
+  fix (`actual: 0.985, expected: 0.9851851851851852`), a regression, so NOT VERIFIED.
+- The docker job runs `make batch-demo` (offline) and the e2e suite gains
+  `test_live_batch_verifies_two_real_crates`, which runs `examples/batch.toml` through
+  Docker with the replay files dropped. cargo 1.68 still downloads the crates.io git
+  index (sparse became the default in 1.70), which dominates the semver live time;
+  setting the sparse protocol for 1.68 and 1.69 is left as a known issue because it
+  would change those recipes.
 
 ## Stashed work
 
-- `stash@{0}` "wip from interrupted agent" (stashed 2026-09-30 by the resume setup)
-  belongs to slice 6, the unticked `batch` part. It holds `src/cargorewind/batch.py`
-  (TOML recipes with `[defaults]`, dedupe by repository slug and resolved fix commit,
-  summary table, `summary.json` and `summary.md`), `tests/test_batch.py` (green with the
-  rest of the suite: 628 passed, 98% coverage), the `batch` command in `cli.py` (no CLI
-  test yet), `examples/batch.toml`, a semver `d92a4d8` git bundle with its LICENSE and a
-  transcript that is still empty (`"runs": {}`, the recording did not finish; the
-  `semver/index` directory that `batch.toml` names does not exist), and a strsim-rs
-  bundle that adds a `demo` ref at `f6a759324b`. Not committed because the second
-  crate's recording is incomplete and the CLI command is untested. A local live run of
-  strsim-rs `f6a759324b` reported a regression
-  (`tests::jaro_winkler_very_long_prefix`), which is presumably why semver was chosen
-  as the second crate instead. Restore with `git stash pop` when finishing slice 6.
+- `stash@{0}` "wip from interrupted agent" was restored with `git stash pop` on
+  2026-09-30 and finished in slice 6 (see its decisions). Kept after review:
+  `batch.py`, `tests/test_batch.py`, the `batch` command, `examples/batch.toml`, the
+  semver bundle and its LICENSE. Dropped: the empty semver transcript (re-recorded
+  live) and the strsim-rs bundle with a `demo` ref at `f6a759324b` (that commit is not
+  a clean flip), so the committed strsim-rs bundle is unchanged.
 
 ## Core (deliverable)
 
@@ -494,7 +528,7 @@ green, pushed, and the README describes it with real output.
 - [x] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
 - [x] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
 - [x] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
-- [ ] 6. Task bundle export, `verify` command and batch recipes with two-crate e2e
+- [x] 6. Task bundle export, `verify` command and batch recipes with two-crate e2e
 
 ### 1. Rust-aware patch split and `#[cfg(test)]` report
 
