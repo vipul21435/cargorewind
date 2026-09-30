@@ -1,8 +1,8 @@
 {
   "build": null,
   "build:toolchain": {
-    "dockerfile_sha256": "3abbd7efc07c6dfc329d0811398f0c971b1108dbd9e7a2ca591a7fbf1e9d59a1",
-    "image_id": "sha256:b636b3163be8e55040b4494998a87c8f66fa3c4e2b6110c39f49ed9605260375"
+    "dockerfile_sha256": "e624e46fa001dbdcdf04cf6dd266b995f02b12ffb43db341e0e435d04043c9e5",
+    "image_id": "sha256:21b6cecccf70d159e195b1ffe78cb78719288b4b33ab19bc89444dd4eba18aeb"
   },
   "recorded_with": "cargorewind 0.1.0",
   "runs": {},

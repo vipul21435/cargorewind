@@ -183,3 +183,22 @@ def test_git_tree_follows_symlinks_only_when_asked(
         assert tree.read(name) is None, name
     assert "rust-toolchain" in tree.paths() and "src/lib.rs" in tree.paths()
     assert git.list_files(base) == sorted(git.list_files(base))
+
+
+def test_grep_words_finds_whole_words_in_matching_files(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    origin = make_repo("origin")
+    files = {
+        "src/a.rs": "fn alpha() { beta(); }\n",
+        "src/deep/b.rs": "// beta\nlet alphabet = 1;\n",
+        "notes.txt": "alpha gamma\n",
+    }
+    rev = origin.commit("base", files, "2024-01-10T12:00:00+00:00")
+    git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
+    found = git.grep_words(rev, ["alpha", "beta", "gamma"], "*.rs")
+    assert found == {"alpha": ["src/a.rs"], "beta": ["src/a.rs", "src/deep/b.rs"]}
+    assert git.grep_words(rev, ["gamma"], "*.rs") == {}
+    assert git.grep_words(rev, [], "*.rs") == {}
+    with pytest.raises(CommandError):
+        git.grep_words("0" * 40, ["alpha"], "*.rs")

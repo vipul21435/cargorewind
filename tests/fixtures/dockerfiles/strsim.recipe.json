@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "image": "rust:1.39.0-slim@sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652",
+  "toolchain": "1.39.0",
+  "base_commit": "c4cdd9c35dfaf7fa4e5e023d22854180b114dd9c",
+  "lock": "generated",
+  "install_toolchain": false,
+  "components": [],
+  "targets": [],
+  "profile": null,
+  "pin_toolchain": false,
+  "cutoff": "",
+  "vendor": false,
+  "cargo_config": "config.toml",
+  "lockfile_sha256": "",
+  "probes": [
+    "jaro_same_one_character",
+    "jaro_winkler_same_one_character"
+  ],
+  "warm_command": [
+    "cargo",
+    "test",
+    "--no-run"
+  ],
+  "test_command": [
+    "cargo",
+    "test",
+    "--no-fail-fast"
+  ],
+  "hash": "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f"
+}

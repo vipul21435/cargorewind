@@ -12,6 +12,7 @@ from cargorewind import __version__, cli, registry
 from cargorewind.backend import ReplayBackend
 from cargorewind.deps import Pin
 from cargorewind.libtest import Outcome, compute_flip
+from cargorewind.probes import ProbeReport
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
 from tests.test_deps import INDEX, FakeCargo
 from tests.test_gitops import linked_repo
@@ -74,7 +75,10 @@ def test_rewind_replay_prints_verified_flip(tmp_path: Path) -> None:
     assert "FAIL_TO_PASS  2" in result.stdout
     assert "  tests::jaro_winkler_same_one_character" in result.stdout
     assert "verdict       VERIFIED fail-to-pass flip" in result.stdout
+    assert "probes        2 identifier(s) passed" in result.stdout
+    assert "probe     in Docker: build passed, before passed, after passed" in result.stdout
     assert (tmp_path / "out" / "task.json").is_file()
+    assert (tmp_path / "out" / "recipe.json").is_file()
 
 
 def test_rewind_record_writes_a_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,9 +108,12 @@ def test_rewind_reports_errors_with_exit_code_1(tmp_path: Path) -> None:
 def test_rewind_exits_2_when_the_flip_is_not_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    flip = compute_flip({"a": Outcome.PASSED}, {"a": Outcome.PASSED}, {"a": Outcome.FAILED})
     report = SimpleNamespace(
-        flip=compute_flip({"a": Outcome.PASSED}, {"a": Outcome.PASSED}, {"a": Outcome.FAILED}),
+        flip=flip,
         lock=SimpleNamespace(bound=object()),
+        probes=ProbeReport(),
+        verified=flip.verified,
     )
     monkeypatch.setattr(cli, "rewind", lambda *args: report)
     missing = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", "x.json"))
@@ -116,7 +123,8 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     assert result.exit_code == 2
     assert "regressions   1: a" in result.stdout
     assert "NOT VERIFIED" in result.stdout
-    assert "lock.json, Cargo.lock, Dockerfile" in result.stdout
+    assert "lock.json, Cargo.lock, probes.json, recipe.json, Dockerfile" in result.stdout
+    assert "probes        none (no new identifier to probe)" in result.stdout
 
 
 def test_rewind_registry_options_reach_the_resolver(

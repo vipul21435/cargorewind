@@ -136,6 +136,23 @@ class Git:
                 modes[path] = meta.split()[0]
         return modes
 
+    def grep_words(self, rev: str, words: list[str], pathspec: str) -> dict[str, list[str]]:
+        """Files of ``rev`` matching ``pathspec`` that contain each of ``words`` as a whole
+        word (``git grep -w -F``: letters, digits and underscores form words, as in GNU
+        grep). Words that occur nowhere are absent from the result."""
+        if not words:
+            return {}
+        patterns = [arg for word in words for arg in ("-e", word)]
+        result = self._run("grep", "-I", "-o", "-w", "-F", "-z", *patterns, rev, "--", pathspec)
+        if result.returncode == 1:  # no match anywhere
+            return {}
+        found: dict[str, set[str]] = {}
+        for line in checked(result).stdout.split("\n"):
+            name, sep, match = line.partition("\0")
+            if sep:
+                found.setdefault(match, set()).add(name.removeprefix(f"{rev}:"))
+        return {word: sorted(paths) for word, paths in found.items()}
+
     def archive(self, rev: str, dest: Path) -> None:
         """Extract the tree of ``rev`` (no .git) into ``dest``."""
         dest.mkdir(parents=True, exist_ok=True)

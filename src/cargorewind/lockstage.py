@@ -30,7 +30,13 @@ from cargorewind.deps import (
     bound_lockfile,
     manifest_requirements,
 )
-from cargorewind.dockerfile import TOOLCHAIN_STAGE, LockStrategy, Recipe, render_dockerfile
+from cargorewind.dockerfile import (
+    TOOLCHAIN_STAGE,
+    LockStrategy,
+    Recipe,
+    render_dockerfile,
+    render_toolchain_stage,
+)
 from cargorewind.gitops import Git, repo_slug
 from cargorewind.layout import SourceTree
 from cargorewind.lockfile import READ_MINIMUM, parse_lockfile
@@ -126,7 +132,9 @@ def recipe_for(
 
     ``RUSTUP_TOOLCHAIN`` is pinned when the base checkout has a toolchain file, and also
     when a patch adds or changes one: the stages extract the patched file into the
-    checkout, and under ``--network none`` rustup could not install its channel.
+    checkout, and under ``--network none`` rustup could not install its channel. The
+    probes are added by the caller, and a date-bounded recipe gets its
+    ``lockfile_sha256`` once the pin loop has run.
     """
     return Recipe(
         image,
@@ -172,9 +180,13 @@ def digest(*parts: str) -> str:
     return sha.hexdigest()
 
 
-def image_tag(source: str, base: str, *parts: str) -> str:
-    """``cargorewind/<repo>:<base>-<digest of the Dockerfile and lockfile>``."""
-    return f"cargorewind/{repo_slug(source)}:{base[:12]}-{digest(*parts)[:12]}"
+def recipe_tag(source: str, recipe: Recipe) -> str:
+    """``cargorewind/<repo>:<first 16 hex digits of the recipe hash>``."""
+    return f"cargorewind/{repo_slug(source)}:{recipe.hash[:16]}"
+
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def run_pin_loop(
@@ -270,11 +282,10 @@ def write_lock_report(
         (out / "Cargo.lock").write_text(plan.bound.lockfile)
 
 
-def dockerfile_for(
-    image: str,
-    toolchain: Toolchain,
-    base: str,
-    plan: LockPlan,
-    patched_toolchain_files: tuple[str, ...] = (),
-) -> str:
-    return render_dockerfile(recipe_for(image, toolchain, base, plan, patched_toolchain_files))
+def first_dockerfile(recipe: Recipe) -> str:
+    """The Dockerfile to put into the build context before any build: the toolchain
+    stage alone for a date-bounded recipe (the pin loop has not written the lockfile
+    yet), the whole file otherwise."""
+    if recipe.lock is LockStrategy.BOUNDED:
+        return render_toolchain_stage(recipe)
+    return render_dockerfile(recipe)

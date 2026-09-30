@@ -1,0 +1,39 @@
+diff --git a/src/window.rs b/src/window.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111
+--- /dev/null
++++ b/src/window.rs
+@@ -0,0 +1,33 @@
++//! Sliding windows over byte strings.
++
++/// The widest window; `fn documented_only` in a doc comment is not code.
++pub const MAX_WINDOW: usize = 64;
++
++/* A block comment that mentions struct Hidden { } is skipped too. */
++pub struct Window<const N: usize> {
++    start: usize,
++}
++
++pub enum Mode {
++    Exact,
++    Loose,
++}
++
++pub trait Scorer {
++    fn score(&self, a: &[u8], b: &[u8]) -> u32;
++}
++
++macro_rules! ensure_width {
++    ($w:expr) => {
++        assert!($w <= MAX_WINDOW, "fn in_a_string {}", $w)
++    };
++}
++
++pub const fn clamp_width(width: usize) -> usize {
++    if width > MAX_WINDOW { MAX_WINDOW } else { width }
++}
++
++pub fn slide(data: &[u8], width: usize) -> usize {
++    ensure_width!(width);
++    data.len().saturating_sub(clamp_width(width)) + 1
++}

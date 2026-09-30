@@ -6,9 +6,16 @@ from pathlib import Path
 import pytest
 
 from cargorewind.crateindex import SparseIndex
-from cargorewind.dockerfile import LockStrategy
+from cargorewind.dockerfile import LockStrategy, Recipe
 from cargorewind.layout import MemoryTree
-from cargorewind.lockstage import cargo_version, default_index, image_tag, plan_lock
+from cargorewind.lockstage import (
+    cargo_version,
+    default_index,
+    first_dockerfile,
+    plan_lock,
+    recipe_for,
+    recipe_tag,
+)
 from cargorewind.toolchain import Toolchain, ToolchainError
 
 CUTOFF = datetime(2019, 12, 13, 2, 48, 41, tzinfo=UTC)
@@ -78,10 +85,31 @@ def test_notes_about_unboundable_dependencies_are_shown() -> None:
     assert plan.lines()[-1] == note
 
 
-def test_default_index_and_image_tags(tmp_path: Path) -> None:
+def test_default_index_and_recipe_tags(tmp_path: Path) -> None:
     index = default_index(CUTOFF, tmp_path)
     assert isinstance(index, SparseIndex)
     assert (index.fresh_after, index.cache_dir) == (CUTOFF, tmp_path)
-    tag = image_tag("https://github.com/rapidfuzz/strsim-rs", "c4cdd9c35dfa" * 2, "FROM x\n", "")
-    assert tag.startswith("cargorewind/strsim-rs:c4cdd9c35dfa-") and len(tag.split("-")[-1]) == 12
-    assert tag != image_tag("strsim-rs", "c4cdd9c35dfa", "FROM x\n", "lock")
+    recipe = Recipe("rust:1.39.0-slim@sha256:" + "a" * 64, "1.39.0", "c4cdd9c35dfa")
+    tag = recipe_tag("https://github.com/rapidfuzz/strsim-rs", recipe)
+    assert tag == f"cargorewind/strsim-rs:{recipe.hash[:16]}"
+    other = Recipe(recipe.image, "1.39.0", "c4cdd9c35dfb")
+    assert recipe_tag("strsim-rs", other) != tag
+
+
+def test_recipe_for_a_bounded_plan_starts_with_the_toolchain_stage_only() -> None:
+    tree = MemoryTree({"Cargo.toml": MANIFEST})
+    toolchain = Toolchain("1.60.0", "release-date", "", toolchain_file="rust-toolchain")
+    plan = plan_lock(tree, toolchain, CUTOFF, vendor=False)
+    recipe = recipe_for("rust:1.60.0-slim@sha256:" + "b" * 64, toolchain, "abc123", plan)
+    assert (recipe.lock, recipe.pin_toolchain, recipe.cutoff) == (
+        LockStrategy.BOUNDED,
+        True,
+        CUTOFF.isoformat(),
+    )
+    stage = first_dockerfile(recipe)
+    assert "FROM toolchain" not in stage and "cargorewind.recipe" not in stage
+    committed = plan_lock(
+        MemoryTree({"Cargo.toml": MANIFEST, "Cargo.lock": ""}), toolchain, CUTOFF, vendor=False
+    )
+    whole = first_dockerfile(recipe_for(recipe.image, toolchain, "abc123", committed))
+    assert whole.rstrip().splitlines()[-1].startswith("LABEL cargorewind.recipe=")

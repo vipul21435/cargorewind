@@ -1,6 +1,21 @@
 from __future__ import annotations
 
-from cargorewind.dockerfile import LockStrategy, Recipe, render_dockerfile, stage_test_command
+import json
+import os
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from cargorewind.dockerfile import (
+    LockStrategy,
+    Recipe,
+    RecipeError,
+    render_dockerfile,
+    render_toolchain_stage,
+    stage_test_command,
+)
 
 IMAGE = "rust:1.39.0-slim@sha256:" + "a" * 64
 
@@ -14,7 +29,8 @@ def test_render_without_lockfile_generates_one() -> None:
     assert "USER rewind" in lines
     assert "RUN cargo generate-lockfile" in lines
     assert "RUN cargo fetch --locked" not in lines
-    assert lines[-1] == "RUN cargo test --no-run"
+    assert lines[-3] == "RUN cargo test --no-run"
+    assert lines[-1].startswith("LABEL cargorewind.recipe=")
     assert text.endswith("\n")
 
 
@@ -93,17 +109,183 @@ def test_date_bounded_lockfile_uses_a_toolchain_stage_and_copies_the_lockfile() 
 
 
 def test_vendoring_writes_the_source_replacement_and_builds_offline() -> None:
-    recipe = Recipe(IMAGE, "1.73.0", "abc", LockStrategy.COMMITTED, vendor=True)
+    recipe = Recipe(IMAGE, "1.73.0", "abc123", LockStrategy.COMMITTED, vendor=True)
     text = render_dockerfile(recipe)
     assert (
         "RUN mkdir -p /home/rewind/.cargo \\\n"
         "    && cargo vendor --locked /home/rewind/vendor > /home/rewind/.cargo/config.toml\n"
         "ENV CARGO_NET_OFFLINE=true\n"
     ) in text
-    assert text.endswith("RUN cargo test --no-run --offline\n")
-    old = Recipe(IMAGE, "1.38.0", "abc", LockStrategy.GENERATED, vendor=True, cargo_config="config")
+    assert "RUN cargo test --no-run --offline\n" in text
+    old = Recipe(
+        IMAGE, "1.38.0", "abc123", LockStrategy.GENERATED, vendor=True, cargo_config="config"
+    )
     old_text = render_dockerfile(old)
     assert "> /home/rewind/.cargo/config\n" in old_text
     assert old_text.index("RUN cargo generate-lockfile") < old_text.index("cargo vendor")
     assert stage_test_command(True) == ("cargo", "test", "--no-fail-fast", "--offline")
     assert stage_test_command(False) == ("cargo", "test", "--no-fail-fast")
+
+
+# Golden Dockerfiles: every byte of the rendered file is pinned. Regenerate with
+# UPDATE_GOLDEN=1 uv run pytest tests/test_dockerfile.py after an intended change.
+
+GOLDEN = Path(__file__).parent / "fixtures" / "dockerfiles"
+STRSIM = Recipe(
+    "rust:1.39.0-slim@sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652",
+    "1.39.0",
+    "c4cdd9c35dfaf7fa4e5e023d22854180b114dd9c",
+    LockStrategy.GENERATED,
+    probes=("jaro_same_one_character", "jaro_winkler_same_one_character"),
+)
+CASES: dict[str, Recipe] = {
+    "generated-with-probes": STRSIM,
+    "committed-components-pinned": Recipe(
+        "rust:1.70.0-slim@sha256:" + "d" * 64,
+        "1.70.0",
+        "0123456789abcdef0123456789abcdef01234567",
+        LockStrategy.COMMITTED,
+        components=("clippy", "rustfmt"),
+        targets=("wasm32-unknown-unknown",),
+        profile="default",
+        pin_toolchain=True,
+        probes=("parse_header", "MAX_DEPTH", "HeaderError"),
+    ),
+    "dated-nightly": Recipe(
+        "rust:1.98.1-slim@sha256:" + "e" * 64,
+        "nightly-2020-01-01",
+        "89abcdef0123456789abcdef0123456789abcdef",
+        LockStrategy.COMMITTED,
+        install_toolchain=True,
+        components=("rustfmt",),
+        pin_toolchain=True,
+    ),
+    "bounded-vendored": Recipe(
+        "rust:1.73.0-slim@sha256:" + "f" * 64,
+        "1.73.0",
+        "e776ff0000000000000000000000000000000000",
+        LockStrategy.BOUNDED,
+        cutoff="2023-10-17T21:35:00+00:00",
+        vendor=True,
+        lockfile_sha256="1" * 64,
+        probes=("check_name",),
+    ),
+    "old-cargo-vendor-config": Recipe(
+        "rust:1.38.0-slim@sha256:" + "0" * 64,
+        "1.38.0",
+        "abcdef0",
+        LockStrategy.GENERATED,
+        vendor=True,
+        cargo_config="config",
+    ),
+}
+
+
+def _golden(name: str, text: str) -> str:
+    path = GOLDEN / name
+    if os.environ.get("UPDATE_GOLDEN"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return path.read_text()
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_golden_dockerfiles(name: str) -> None:
+    recipe = CASES[name]
+    text = render_dockerfile(recipe)
+    assert text == _golden(f"{name}.Dockerfile", text)
+    assert render_dockerfile(Recipe.from_dict(recipe.as_dict())) == text
+
+
+def test_golden_toolchain_stage_and_recipe_json() -> None:
+    bounded = CASES["bounded-vendored"]
+    stage = render_toolchain_stage(bounded)
+    assert stage == _golden("bounded-vendored.stage.Dockerfile", stage)
+    assert render_dockerfile(bounded).startswith(stage)
+    # The stage does not depend on the lockfile the pin loop writes afterwards.
+    assert render_toolchain_stage(replace(bounded, lockfile_sha256="")) == stage
+    document = json.dumps(STRSIM.document(), indent=2) + "\n"
+    assert document == _golden("strsim.recipe.json", document)
+    with pytest.raises(RecipeError, match="only a date-bounded recipe"):
+        render_toolchain_stage(STRSIM)
+
+
+def test_recipe_hash_is_the_sha256_of_canonical_json() -> None:
+    canonical = STRSIM.canonical_json()
+    assert canonical.startswith('{"base_commit":"c4cdd9c35dfaf7fa4e5e023d22854180b114dd9c",')
+    assert " " not in canonical and canonical.isascii()
+    assert json.loads(canonical) == STRSIM.as_dict()
+    # Pinned: a change here means every cached image and golden file changes too.
+    assert STRSIM.hash == "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f"
+    assert f"LABEL cargorewind.recipe={STRSIM.hash}" in render_dockerfile(STRSIM)
+    assert STRSIM.document()["hash"] == STRSIM.hash
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"image": "rust:1.39.0-slim@sha256:" + "9" * 64},
+        {"toolchain": "1.39"},
+        {"base_commit": "c4cdd9c35dfb"},
+        {"lock": LockStrategy.COMMITTED},
+        {"pin_toolchain": True},
+        {"vendor": True},
+        {"probes": ("jaro_same_one_character",)},
+        {"test_command": ("cargo", "test")},
+        {"warm_command": ("cargo", "build")},
+        {"components": ("rustfmt",)},
+    ],
+)
+def test_every_field_changes_the_hash(change: dict[str, Any]) -> None:
+    assert replace(STRSIM, **change).hash != STRSIM.hash
+
+
+def test_equal_recipes_hash_equally_and_defaults_fill_the_commands() -> None:
+    again = Recipe(STRSIM.image, "1.39.0", STRSIM.base_commit, "generated", probes=STRSIM.probes)  # type: ignore[arg-type]
+    assert again == STRSIM and again.hash == STRSIM.hash
+    assert STRSIM.warm_command == ("cargo", "test", "--no-run")
+    assert STRSIM.test_command == ("cargo", "test", "--no-fail-fast")
+    vendored = replace(STRSIM, vendor=True, warm_command=(), test_command=())
+    assert vendored.warm_command[-1] == vendored.test_command[-1] == "--offline"
+
+
+@pytest.mark.parametrize(
+    ("change", "match"),
+    [
+        ({"image": "rust:1.39.0-slim"}, "image"),
+        ({"image": STRSIM.image + "\nRUN evil"}, "image"),
+        ({"toolchain": "1.39.0\n"}, "toolchain"),
+        ({"toolchain": "1.39.0 && curl x"}, "toolchain"),
+        ({"base_commit": "HEAD"}, "base_commit"),
+        ({"components": ("rustfmt\n",)}, "component"),
+        ({"targets": ("a;b",)}, "component or target"),
+        ({"profile": "tiny"}, "profile"),
+        ({"cutoff": "2023-10-17 RUN"}, "cutoff"),
+        ({"cargo_config": "../config"}, "cargo_config"),
+        ({"lockfile_sha256": "1" * 64}, "only set for a date-bounded"),
+        ({"lockfile_sha256": "xyz"}, "lockfile_sha256"),
+        ({"probes": ("two words",)}, "probe"),
+        ({"probes": ("r#type",)}, "probe"),
+        ({"probes": ("same", "same")}, "unique"),
+        ({"test_command": ("cargo", "test;", "rm")}, "command word"),
+        ({"warm_command": ("cargo", "$(evil)")}, "command word"),
+    ],
+)
+def test_recipe_rejects_values_that_could_inject_dockerfile_lines(
+    change: dict[str, Any], match: str
+) -> None:
+    with pytest.raises(RecipeError, match=match):
+        replace(STRSIM, **change)
+
+
+def test_recipe_from_dict_errors() -> None:
+    data = STRSIM.document()
+    assert Recipe.from_dict(data) == STRSIM  # the hash key is ignored
+    with pytest.raises(RecipeError, match="schema"):
+        Recipe.from_dict({**data, "schema": 2})
+    with pytest.raises(RecipeError, match="unknown recipe fields: extra"):
+        Recipe.from_dict({**data, "extra": 1})
+    with pytest.raises(RecipeError, match="incomplete recipe"):
+        Recipe.from_dict({"schema": 1, "image": STRSIM.image})
+    with pytest.raises(RecipeError, match="lock 'sometimes'"):
+        Recipe.from_dict({**data, "lock": "sometimes"})

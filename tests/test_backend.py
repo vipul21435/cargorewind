@@ -16,7 +16,10 @@ from cargorewind.backend import (
     ReplayError,
     RunResult,
     container_script,
+    probe_step,
+    sha256_text,
 )
+from cargorewind.dockerfile import TEST_COMMAND
 from cargorewind.runner import CommandError, CommandResult
 from tests.conftest import FakeRunner
 
@@ -61,6 +64,20 @@ def test_container_script() -> None:
     )
 
 
+def test_container_script_checks_probe_words_before_cargo() -> None:
+    script = container_script(Overlay({"a.rs": b""}), TEST_COMMAND, ("one", "two_2"))
+    assert script == (
+        "cd /home/rewind/repo && tar -xmf - && "
+        "for w in one two_2; do grep -rqwF --include='*.rs' -e \"$w\" . "
+        '|| { echo "cargorewind probe failed: $w is missing"; exit 97; }; done && '
+        "exec cargo test --no-fail-fast 2>&1"
+    )
+    with pytest.raises(ValueError, match="not an identifier"):
+        probe_step(("ok", "bad; rm -rf /"))
+    with pytest.raises(ValueError, match="not an identifier"):
+        probe_step(("trailing\n",))
+
+
 def test_docker_build_uses_label_and_returns_image_id(tmp_path: Path) -> None:
     runner = FakeRunner(
         [
@@ -103,6 +120,8 @@ def test_docker_run_streams_overlay_and_isolates_network() -> None:
     assert argv[argv.index("--network") : argv.index("--network") + 2] == ("--network", "none")
     assert "CARGO_NET_OFFLINE=true" in argv
     assert call["stdin"] == overlay.to_tar()
+    DockerBackend(runner).run_tests("img", "after", overlay, TEST_COMMAND, ("fix_word",))
+    assert "for w in fix_word;" in runner.calls[1]["argv"][-1]  # type: ignore[index]
 
 
 def test_docker_run_without_overlay_sends_no_stdin_and_kills_on_timeout() -> None:
@@ -132,7 +151,12 @@ class _StubBackend:
         return BuildResult(f"sha256:img-{target or 'final'}", "log")
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = ()
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = (),
+        probes: tuple[str, ...] = (),
     ) -> RunResult:
         return RunResult(0, f"test {stage} ... ok\n")
 
@@ -152,6 +176,8 @@ def test_record_then_replay_round_trip(tmp_path: Path) -> None:
     assert data["schema"] == 1
     assert data["build"]["image_id"] == "sha256:img-final"
     assert data["runs"]["before"]["overlay_sha256"] == overlay.digest()
+    script = container_script(overlay, TEST_COMMAND)
+    assert data["runs"]["before"]["script_sha256"] == sha256_text(script)
     assert "steps" not in data  # no session, no steps: old transcripts stay unchanged
 
     replay = ReplayBackend(transcript)
@@ -226,6 +252,14 @@ def test_replay_rejects_drifted_inputs(tmp_path: Path) -> None:
 
     with pytest.raises(ReplayError, match="files for stage"):
         replay.run_tests("t", "before", Overlay({"a": b"2"}))
+    with pytest.raises(ReplayError, match="script of stage 'before' differs"):
+        replay.run_tests("t", "before", Overlay({"a": b"1"}), TEST_COMMAND, ("probe_word",))
+    # A transcript recorded before stage scripts were hashed still replays.
+    data = json.loads(transcript.read_text())
+    del data["runs"]["before"]["script_sha256"]
+    transcript.write_text(json.dumps(data))
+    old = ReplayBackend(transcript).run_tests("t", "before", Overlay({"a": b"1"}), probes=("w",))
+    assert old.exit_code == 0
     with pytest.raises(ReplayError, match="no recorded run"):
         replay.run_tests("t", "after", Overlay())
     (context / "Dockerfile").write_text("FROM other\n")

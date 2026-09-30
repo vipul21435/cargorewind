@@ -1,4 +1,5 @@
-"""The end-to-end rewind: checkout, split, toolchain, Dockerfile, three runs, bundle."""
+"""The end-to-end rewind: checkout, split, toolchain, probes, recipe, build, three runs,
+bundle."""
 
 from __future__ import annotations
 
@@ -9,25 +10,28 @@ from pathlib import Path
 from typing import Any
 
 from cargorewind import __version__
-from cargorewind.backend import Backend, Overlay, RunResult
+from cargorewind.backend import Backend, BuildResult, Overlay, RunResult
 from cargorewind.crateindex import CrateIndex
-from cargorewind.dockerfile import LockStrategy, stage_test_command
+from cargorewind.dockerfile import PROBE_GLOB, LockStrategy, Recipe, render_dockerfile
 from cargorewind.gitops import Git, GitError, GitTree, open_checkout
 from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
 from cargorewind.lockstage import (
     LockPlan,
     build_context,
     default_index,
-    dockerfile_for,
-    image_tag,
+    first_dockerfile,
     plan_lock,
+    recipe_for,
+    recipe_tag,
     run_pin_loop,
+    sha256_hex,
     write_lock_report,
 )
 from cargorewind.patchsplit import SplitResult
+from cargorewind.probes import ProbeReport, plan_probes
 from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
-from cargorewind.splitreport import require, resolve_commits, split_commit, touched
+from cargorewind.splitreport import Commits, require, resolve_commits, split_commit, touched
 from cargorewind.toolchain import TOOLCHAIN_FILES, Decision, Toolchain
 from cargorewind.toolchainreport import choose_image, infer_toolchain, toolchain_document
 
@@ -50,6 +54,10 @@ class RewindOptions:
     index: CrateIndex | None = None  # default: the live sparse index behind the cache
 
 
+class ProbeError(RuntimeError):
+    """A host-side sanity probe failed; nothing was built."""
+
+
 @dataclass
 class StageRun:
     stage: str
@@ -65,11 +73,23 @@ class RewindReport:
     commit_date: str
     toolchain: Toolchain
     image: ImageChoice
-    image_id: str
     lock: LockPlan
     split: SplitResult
+    recipe: Recipe
+    tag: str
+    built: BuildResult
+    probes: ProbeReport
     runs: dict[str, StageRun] = field(default_factory=dict)
     flip: Flip | None = None
+
+    @property
+    def image_id(self) -> str:
+        return self.built.image_id
+
+    @property
+    def verified(self) -> bool:
+        """The flip holds and every sanity probe passed."""
+        return self.flip is not None and self.flip.verified and self.probes.ok
 
     def task(self) -> dict[str, Any]:
         """The task.json document."""
@@ -87,7 +107,16 @@ class RewindReport:
             "lockfile": self.lock.strategy.value,
             "lock_report": "lock.json",
             "vendored": self.lock.vendor,
-            "test_command": " ".join(stage_test_command(self.lock.vendor)),
+            "test_command": " ".join(self.recipe.test_command),
+            "recipe": {"hash": self.recipe.hash, "report": "recipe.json"},
+            "image_tag": self.tag,
+            "probes": {
+                "identifiers": [p.as_dict() for p in self.probes.probes],
+                "skipped": len(self.probes.skipped),
+                "container_checks": self.probes.container,
+                "ok": self.probes.ok,
+                "report": "probes.json",
+            },
             "split": {
                 "test_files": sorted(d.path for d in self.split.test_files),
                 "fix_files": sorted(d.path for d in self.split.fix_files),
@@ -119,7 +148,7 @@ class RewindReport:
             "PASS_TO_PASS": self.flip.pass_to_pass,
             "regressions": self.flip.regressions,
             "still_failing": self.flip.still_failing,
-            "verified": self.flip.verified,
+            "verified": self.verified,
         }
 
 
@@ -176,62 +205,36 @@ def build_overlays(
     return {"base": Overlay(), "before": before, "after": after}
 
 
-def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -> RewindReport:
-    out, workdir = options.out, options.workdir
-    git = open_checkout(runner, options.source, workdir)
-    commits = resolve_commits(git, options.fix, options.base, log)
-    base, fix, commit_time = commits.base, commits.fix, commits.commit_time
-    split, checks = split_commit(commits, options.source, out, log)
-    require(checks)
-
+def _environment(
+    options: RewindOptions, commits: Commits, split: SplitResult, log: Log
+) -> tuple[Toolchain, LockPlan, ImageChoice, tuple[str, ...]]:
+    """Toolchain, dependency plan and base image; writes toolchain.json."""
     toolchain = infer_toolchain(commits)
-    patched = tuple(p for p in touched(split.test_files + split.fix_files) if p in TOOLCHAIN_FILES)
+    paths = touched(split.test_files + split.fix_files)
+    patched = tuple(p for p in paths if p in TOOLCHAIN_FILES)
     if patched:
         toolchain = pin_patched_toolchain(toolchain, patched)
-    tree = GitTree(git, base, follow_links=True)
-    plan = plan_lock(tree, toolchain, commit_time, options.vendor)
+    tree = GitTree(commits.git, commits.base, follow_links=True)
+    plan = plan_lock(tree, toolchain, commits.commit_time, options.vendor)
     choice = choose_image(toolchain, options.image, options.resolver)
-    image = choice.reference
     document = toolchain_document(options.source, commits, toolchain, choice)
-    (out / "toolchain.json").write_text(json.dumps(document, indent=2) + "\n")
+    (options.out / "toolchain.json").write_text(json.dumps(document, indent=2) + "\n")
     log(f"toolchain {toolchain.version}: {toolchain.reason}")
-    log(f"image     {image}")
+    log(f"image     {choice.reference}")
     for line in plan.lines():
         log(line)
+    return toolchain, plan, choice, patched
 
-    dockerfile = dockerfile_for(image, toolchain, base, plan, patched)
-    (out / "Dockerfile").write_text(dockerfile)
 
-    overlays = build_overlays(git, base, fix, split, out)
-
-    # A build context of its own: parallel runs of one repository share the work directory.
-    with build_context(git, base, workdir, dockerfile) as context:
-        lockfile = ""
-        if plan.strategy is LockStrategy.BOUNDED:
-            index = options.index or default_index(commit_time)
-            lockfile = run_pin_loop(plan, backend, context, index, log).lockfile
-        write_lock_report(out, options.source, commits, toolchain, plan)
-        tag = image_tag(options.source, base, dockerfile, lockfile)
-        log(f"build     {tag}")
-        built = backend.build(context, tag)
-    logs = out / "logs"
-    logs.mkdir(exist_ok=True)
-    (logs / "build.log").write_text(built.log)
-
-    report = RewindReport(
-        options.source,
-        base,
-        fix,
-        commit_time.isoformat(),
-        toolchain,
-        choice,
-        built.image_id,
-        plan,
-        split,
-    )
-    command = stage_test_command(plan.vendor)
+def _run_stages(
+    report: RewindReport, backend: Backend, overlays: dict[str, Overlay], logs: Path, log: Log
+) -> None:
+    probes = report.probes
     for stage in STAGES:
-        result = backend.run_tests(tag, stage, overlays[stage], command)
+        required = probes.required(stage)
+        command = report.recipe.test_command
+        result = backend.run_tests(report.tag, stage, overlays[stage], command, required)
+        probes.record_stage(stage, result.output)
         (logs / f"{stage}.log").write_text(result.output)
         outcomes = parse_libtest(result.output)
         report.runs[stage] = StageRun(stage, result, outcomes)
@@ -240,7 +243,73 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
             f"run       {stage:<6} exit {result.exit_code:>3}  "
             f"{counts['passed']} passed, {counts['failed']} failed, {counts['ignored']} ignored"
         )
+    if probes.words:
+        checked = ", ".join(f"{stage} {status}" for stage, status in probes.container.items())
+        log(f"probe     in Docker: {checked}")
 
+
+def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -> RewindReport:
+    out, workdir = options.out, options.workdir
+    git = open_checkout(runner, options.source, workdir)
+    commits = resolve_commits(git, options.fix, options.base, log)
+    base, fix = commits.base, commits.fix
+    split, checks = split_commit(commits, options.source, out, log)
+    require(checks)
+    toolchain, plan, choice, patched = _environment(options, commits, split, log)
+
+    overlays = build_overlays(git, base, fix, split, out)
+    probes = plan_probes(
+        split, overlays, lambda words: git.grep_words(base, words, PROBE_GLOB), checks.as_dict()
+    )
+    for line in probes.lines():
+        log(line)
+    if not probes.ok:
+        _write_probes(out, options.source, base, fix, probes)
+        raise ProbeError("a sanity probe failed on the host; see probes.json")
+
+    base_recipe = recipe_for(choice.reference, toolchain, base, plan, patched)
+    recipe = replace(base_recipe, probes=probes.words)
+    # A build context of its own: parallel runs of one repository share the work directory.
+    with build_context(git, base, workdir, first_dockerfile(recipe)) as context:
+        if plan.strategy is LockStrategy.BOUNDED:
+            index = options.index or default_index(commits.commit_time)
+            bound = run_pin_loop(plan, backend, context, index, log)
+            recipe = replace(recipe, lockfile_sha256=sha256_hex(bound.lockfile))
+        dockerfile = render_dockerfile(recipe)
+        (context / "Dockerfile").write_text(dockerfile)
+        (out / "Dockerfile").write_text(dockerfile)
+        (out / "recipe.json").write_text(json.dumps(recipe.document(), indent=2) + "\n")
+        write_lock_report(out, options.source, commits, toolchain, plan)
+        log(f"recipe    {recipe.hash}")
+        tag = recipe_tag(options.source, recipe)
+        log(f"build     {tag}")
+        built = backend.build(context, tag)
+    probes.container["build"] = "passed" if probes.words else "no probe"
+    logs = out / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / "build.log").write_text(built.log)
+
+    report = RewindReport(
+        options.source,
+        base,
+        fix,
+        commits.commit_time.isoformat(),
+        toolchain,
+        choice,
+        plan,
+        split,
+        recipe,
+        tag,
+        built,
+        probes,
+    )
+    _run_stages(report, backend, overlays, logs, log)
     report.flip = compute_flip(*(report.runs[s].outcomes for s in STAGES))
+    _write_probes(out, options.source, base, fix, probes)
     (out / "task.json").write_text(json.dumps(report.task(), indent=2) + "\n")
     return report
+
+
+def _write_probes(out: Path, source: str, base: str, fix: str, probes: ProbeReport) -> None:
+    document = probes.document(source, base, fix)
+    (out / "probes.json").write_text(json.dumps(document, indent=2) + "\n")

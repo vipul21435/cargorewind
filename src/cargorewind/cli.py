@@ -19,20 +19,21 @@ from cargorewind.backend import (
 )
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
 from cargorewind.deps import LockError
-from cargorewind.dockerfile import LockStrategy
+from cargorewind.dockerfile import LockStrategy, RecipeError
 from cargorewind.gitops import GitError, GitTree, open_checkout, repo_slug
 from cargorewind.lockfile import LockfileError
 from cargorewind.lockstage import (
     build_context,
     default_index,
-    dockerfile_for,
+    first_dockerfile,
     plan_lock,
+    recipe_for,
     run_pin_loop,
     write_lock_report,
 )
 from cargorewind.patchsplit import PatchError
 from cargorewind.registry import make_resolver
-from cargorewind.rewind import RewindOptions, RewindReport, rewind
+from cargorewind.rewind import ProbeError, RewindOptions, RewindReport, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
 from cargorewind.splitreport import resolve_commits, split_commit
 from cargorewind.toolchain import ToolchainError
@@ -113,6 +114,8 @@ FAILURES = (
     LockError,
     LockfileError,
     PatchError,
+    ProbeError,
+    RecipeError,
     ReplayError,
     ToolchainError,
 )
@@ -147,9 +150,18 @@ def _print_summary(report: RewindReport, out: Path) -> None:
         typer.echo(f"regressions   {len(flip.regressions)}: {', '.join(flip.regressions)}")
     if flip.still_failing:
         typer.echo(f"still failing {len(flip.still_failing)}: {', '.join(flip.still_failing)}")
-    verdict = "VERIFIED" if flip.verified else "NOT VERIFIED"
+    probes = report.probes
+    if probes.words:
+        state = "passed" if probes.ok else "FAILED"
+        typer.echo(f"probes        {len(probes.words)} identifier(s) {state}")
+    else:
+        typer.echo("probes        none (no new identifier to probe)")
+    verdict = "VERIFIED" if report.verified else "NOT VERIFIED"
     typer.echo(f"verdict       {verdict} fail-to-pass flip")
-    files = "task.json, split.json, toolchain.json, lock.json, Dockerfile, patches, logs/"
+    files = (
+        "task.json, split.json, toolchain.json, lock.json, probes.json, recipe.json, "
+        "Dockerfile, patches, logs/"
+    )
     if report.lock.bound is not None:
         files = files.replace("lock.json", "lock.json, Cargo.lock")
     typer.echo(f"bundle        {out}/ ({files})")
@@ -282,7 +294,7 @@ def rewind_command(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _print_summary(report, out)
-    if report.flip is None or not report.flip.verified:
+    if not report.verified:
         raise typer.Exit(code=EXIT_NOT_VERIFIED)
 
 
@@ -328,7 +340,8 @@ def lock_command(
         if plan.strategy is LockStrategy.BOUNDED:
             image = choose_image(toolchain, None, make_resolver(registry, cache_dir))
             typer.echo(f"image     {image.reference}")
-            dockerfile = dockerfile_for(image.reference, toolchain, commits.base, plan)
+            recipe = recipe_for(image.reference, toolchain, commits.base, plan)
+            dockerfile = first_dockerfile(recipe)
             index = _index(index_dir) or default_index(commits.commit_time, cache_dir)
             with build_context(git, commits.base, workdir, dockerfile) as context:
                 run_pin_loop(plan, backend, context, index, typer.echo)

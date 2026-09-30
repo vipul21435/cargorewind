@@ -1,0 +1,20 @@
+diff --git a/tests/window.rs b/tests/window.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2222222222222222222222222222222222222222
+--- /dev/null
++++ b/tests/window.rs
+@@ -0,0 +1,14 @@
++use demo::window::{slide, MAX_WINDOW};
++
++fn score(a: &[u8]) -> usize {
++    a.len()
++}
++
++#[test]
++fn slide_counts_every_window() {
++    assert_eq!(slide(b"abcd", 2), 3);
++    assert_eq!(score(b"ab"), 2);
++    let _: *const u8 = std::ptr::null();
++    assert!(MAX_WINDOW > 0);
++}
++

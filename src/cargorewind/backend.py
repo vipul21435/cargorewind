@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import tarfile
 from dataclasses import asdict, dataclass, field
@@ -24,7 +25,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from cargorewind import __version__
-from cargorewind.dockerfile import PROJECT_LABEL, REPO_DIR, TEST_COMMAND
+from cargorewind.dockerfile import (
+    PROBE_EXIT_CODE,
+    PROBE_GLOB,
+    PROBE_MARKER,
+    PROJECT_LABEL,
+    REPO_DIR,
+    TEST_COMMAND,
+)
 from cargorewind.runner import Runner, checked
 
 _sessions = 0
@@ -91,7 +99,12 @@ class Backend(Protocol):
     def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult: ...
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = TEST_COMMAND,
+        probes: tuple[str, ...] = (),
     ) -> RunResult: ...
 
     def open_session(self, tag: str) -> Session: ...
@@ -101,13 +114,32 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def container_script(overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND) -> str:
-    """Shell script run in the container: unpack the overlay, then run the tests."""
+_PROBE_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def probe_step(probes: tuple[str, ...]) -> str:
+    """Shell loop that exits ``PROBE_EXIT_CODE`` unless every probe word is in the checkout."""
+    for word in probes:
+        if _PROBE_WORD.fullmatch(word) is None:
+            raise ValueError(f"probe {word!r} is not an identifier")
+    return (
+        f"for w in {' '.join(probes)}; do grep -rqwF --include='{PROBE_GLOB}' -e \"$w\" . "
+        f'|| {{ echo "{PROBE_MARKER} $w is missing"; exit {PROBE_EXIT_CODE}; }}; done'
+    )
+
+
+def container_script(
+    overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND, probes: tuple[str, ...] = ()
+) -> str:
+    """Shell script run in the container: unpack the overlay, check that the probe
+    identifiers are there, then run the tests."""
     steps = [f"cd {REPO_DIR}"]
     if overlay.files:
         steps.append("tar -xmf -")  # -m: fresh mtimes, so cargo rebuilds changed files
     if overlay.deleted:
         steps.append("rm -f -- " + " ".join(shlex.quote(p) for p in overlay.deleted))
+    if probes:
+        steps.append(probe_step(probes))
     steps.append("exec " + " ".join(command) + " 2>&1")
     return " && ".join(steps)
 
@@ -153,7 +185,12 @@ class DockerBackend:
         return DockerSession(self.runner, tag, self.timeout)
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = TEST_COMMAND,
+        probes: tuple[str, ...] = (),
     ) -> RunResult:
         name = f"cargorewind-{stage}-{os.getpid()}"
         argv = [
@@ -172,7 +209,7 @@ class DockerBackend:
             tag,
             "sh",
             "-c",
-            container_script(overlay, command),
+            container_script(overlay, command, probes),
         ]
         stdin = overlay.to_tar() if overlay.files else None
         result = self.runner.run(argv, stdin=stdin, timeout=self.timeout)
@@ -235,10 +272,19 @@ class RecordingBackend:
         return _RecordingSession(self, self.inner.open_session(tag))
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = TEST_COMMAND,
+        probes: tuple[str, ...] = (),
     ) -> RunResult:
-        result = self.inner.run_tests(tag, stage, overlay, command)
-        self.data["runs"][stage] = {"overlay_sha256": overlay.digest(), **asdict(result)}
+        result = self.inner.run_tests(tag, stage, overlay, command, probes)
+        self.data["runs"][stage] = {
+            "overlay_sha256": overlay.digest(),
+            "script_sha256": sha256_text(container_script(overlay, command, probes)),
+            **asdict(result),
+        }
         self.save()
         return result
 
@@ -286,13 +332,21 @@ class ReplayBackend:
         return _ReplaySession(self)
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = TEST_COMMAND,
+        probes: tuple[str, ...] = (),
     ) -> RunResult:
         recorded = self.data["runs"].get(stage)
         if recorded is None:
             raise ReplayError(f"{self.path}: no recorded run for stage {stage!r}")
         if recorded["overlay_sha256"] != overlay.digest():
             raise ReplayError(f"files for stage {stage!r} differ from the recorded run")
+        script = sha256_text(container_script(overlay, command, probes))
+        if recorded.get("script_sha256", script) != script:
+            raise ReplayError(f"the script of stage {stage!r} differs from the recorded run")
         return RunResult(
             int(recorded["exit_code"]), str(recorded["output"]), bool(recorded["timed_out"])
         )

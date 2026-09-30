@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from cargorewind import rewind as rewind_module
 from cargorewind.backend import BuildResult, Overlay, ReplayBackend, RunResult
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
+from cargorewind.dockerfile import PROBE_MARKER
 from cargorewind.gitops import GitError
+from cargorewind.probes import HostCheck, ProbeReport
 from cargorewind.registry import HttpResponse, ImageResolver, RegistryClient
-from cargorewind.rewind import RewindOptions, rewind
+from cargorewind.rewind import ProbeError, RewindOptions, rewind
 from cargorewind.runner import SubprocessRunner
 from cargorewind.toolchain import IMAGE_DIGESTS, ToolchainError
 from tests.conftest import GitRepo
@@ -82,6 +87,8 @@ class ScriptedBackend:
         self.overlays: dict[str, Overlay] = {}
         self.commands: dict[str, tuple[str, ...]] = {}
         self.builds: list[tuple[str, str | None, bool]] = []
+        self.probes: dict[str, tuple[str, ...]] = {}
+        self.tags: dict[str, str] = {}
         self.dockerfile = ""
         self.session = session
 
@@ -92,10 +99,17 @@ class ScriptedBackend:
         return BuildResult("sha256:fake", "built\n")
 
     def run_tests(
-        self, tag: str, stage: str, overlay: Overlay, command: tuple[str, ...] = ()
+        self,
+        tag: str,
+        stage: str,
+        overlay: Overlay,
+        command: tuple[str, ...] = (),
+        probes: tuple[str, ...] = (),
     ) -> RunResult:
         self.overlays[stage] = overlay
         self.commands[stage] = command
+        self.probes[stage] = probes
+        self.tags[stage] = tag
         code, text = self.outputs[stage]
         return RunResult(code, text)
 
@@ -178,6 +192,48 @@ def test_rewind_synthetic_crate_end_to_end(
     assert not any("first parent" in line for line in lines)
 
 
+def test_rewind_probes_and_recipe_of_the_synthetic_crate(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+    backend = ScriptedBackend(PASSING)
+    lines: list[str] = []
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", base=base)
+    rewind(options, SubprocessRunner(), backend, lines.append)
+    task = json.loads((out / "task.json").read_text())
+    # Sanity probes: the test adds fn two, which must be absent at base.
+    assert task["probes"]["identifiers"] == [
+        {"kind": "fn", "name": "two", "patch": "test", "path": "src/lib.rs", "line": 10}
+    ]
+    assert task["probes"]["ok"] is True and task["verified"] is True
+    assert task["probes"]["container_checks"] == {
+        "build": "passed",
+        "before": "passed",
+        "after": "passed",
+    }
+    assert "        -e two \\\n" in backend.dockerfile
+    assert backend.probes == {"base": (), "before": ("two",), "after": ("two",)}
+    probes = json.loads((out / "probes.json").read_text())
+    assert probes["patch_checks"] == {
+        "test_patch_applies_at_base": True,
+        "fix_patch_applies_after_test_patch": True,
+        "patches_reproduce_fix": True,
+    }
+    assert [c["ok"] for c in probes["host_checks"]] == [True, True, True, True]
+    assert any(
+        ln.startswith("probe     test fn two (src/lib.rs:10): absent at base") for ln in lines
+    )
+
+    # The recipe: its hash tags the image and labels the Dockerfile.
+    recipe = json.loads((out / "recipe.json").read_text())
+    assert task["recipe"] == {"hash": recipe["hash"], "report": "recipe.json"}
+    assert backend.dockerfile.endswith(f"LABEL cargorewind.recipe={recipe['hash']}\n")
+    assert task["image_tag"] == f"cargorewind/origin:{recipe['hash'][:16]}"
+    assert backend.tags["after"] == task["image_tag"]
+
+
 PASSING = {
     "base": (0, "test tests::zero ... ok\n"),
     "before": (101, "test tests::zero ... ok\ntest tests::two ... FAILED\n"),
@@ -247,6 +303,99 @@ def test_rewind_pins_the_toolchain_when_the_fix_adds_a_toolchain_file(
     assert report["toolchain"]["decisions"][-1] == pin
 
 
+TRIPLE = LIB.replace(
+    "#[cfg(test)]",
+    "pub fn triple(x: i32) -> i32 {\n    x * 3\n}\n\n#[cfg(test)]",
+).replace(
+    "    use super::*;\n",
+    "    use super::*;\n\n    #[test]\n    fn triple_works() {\n"
+    "        assert_eq!(triple(1), 3);\n    }\n",
+)
+
+
+def _triple_crate(repo: GitRepo) -> str:
+    files = {
+        "Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\n',
+        "src/lib.rs": LIB,
+        "rust-toolchain": "1.70\n",
+        "Cargo.lock": "version = 3\n",
+    }
+    repo.commit("base", files, "2024-01-10T12:00:00+00:00")
+    return repo.commit("fix", {"src/lib.rs": TRIPLE}, "2024-01-11T12:00:00+00:00")
+
+
+TRIPLE_RUNS = {
+    "base": (0, "test tests::zero ... ok\n"),
+    "before": (101, "error[E0425]: cannot find function `triple` in this scope\n"),
+    "after": (0, "test tests::zero ... ok\ntest tests::triple_works ... ok\n"),
+}
+
+
+def test_rewind_probes_a_new_function_of_the_fix(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    fix = _triple_crate(repo)
+    backend = ScriptedBackend(TRIPLE_RUNS)
+    out = tmp_path / "out"
+    report = rewind(
+        RewindOptions(str(repo.path), fix, out, tmp_path / "work"),
+        SubprocessRunner(),
+        backend,
+        lambda _: None,
+    )
+    assert [(p.patch, p.name) for p in report.probes.probes] == [
+        ("fix", "triple"),
+        ("test", "triple_works"),
+    ]
+    # The before run needs only the test's name; the test calls triple, which must not
+    # be defined yet (it is not: that is why the before run fails to compile).
+    assert backend.probes["before"] == ("triple_works",)
+    assert backend.probes["after"] == ("triple", "triple_works")
+    assert report.verified and report.flip is not None
+    assert report.flip.fail_to_pass == ["tests::triple_works"]
+    assert report.image_id == "sha256:fake"
+    assert "        -e triple \\\n        -e triple_works \\\n" in backend.dockerfile
+
+
+def test_a_failed_stage_probe_blocks_verification(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    fix = _triple_crate(repo)
+    runs = {**TRIPLE_RUNS, "after": (97, f"{PROBE_MARKER} triple is missing\n")}
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work")
+    report = rewind(options, SubprocessRunner(), ScriptedBackend(runs), lambda _: None)
+    assert not report.verified
+    task = json.loads((out / "task.json").read_text())
+    assert task["verified"] is False and task["probes"]["ok"] is False
+    assert task["probes"]["container_checks"]["after"] == "failed"
+    assert json.loads((out / "probes.json").read_text())["ok"] is False
+
+
+def test_a_failed_host_probe_stops_before_docker(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = make_repo("origin")
+    fix = _triple_crate(repo)
+    real = rewind_module.plan_probes
+
+    def broken(*args: Any, **kwargs: Any) -> ProbeReport:
+        report = real(*args, **kwargs)
+        report.checks[0] = HostCheck("base", "no probe identifier occurs at base", False, "x")
+        return report
+
+    monkeypatch.setattr(rewind_module, "plan_probes", broken)
+    backend = ScriptedBackend({})
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work")
+    with pytest.raises(ProbeError, match="sanity probe failed on the host"):
+        rewind(options, SubprocessRunner(), backend, lambda _: None)
+    assert backend.builds == []
+    assert json.loads((out / "probes.json").read_text())["ok"] is False
+
+
 def test_rewind_detects_patches_that_do_not_reproduce_the_fix(
     make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -304,7 +453,7 @@ def test_rewind_bounds_a_missing_lockfile_by_the_commit_date(
     make_repo: Callable[[str], GitRepo], tmp_path: Path
 ) -> None:
     repo = make_repo("origin")
-    base, fix = _home_crate(repo)
+    _, fix = _home_crate(repo)
     session = CargoModelSession(FakeCargo(INDEX, {"demo": [("home", "0.5.4")]}))
     backend = ScriptedBackend(PASSING, session)
     out = tmp_path / "out"
@@ -315,7 +464,12 @@ def test_rewind_bounds_a_missing_lockfile_by_the_commit_date(
     assert report.flip is not None and report.flip.verified
     (stage, final) = backend.builds
     assert stage[0].startswith("cargorewind/toolchain-stage:") and stage[1:] == ("toolchain", False)
-    assert final[0].startswith(f"cargorewind/origin:{base[:12]}-") and final[1:] == (None, True)
+    recipe = json.loads((out / "recipe.json").read_text())
+    assert final == (f"cargorewind/origin:{recipe['hash'][:16]}", None, True)
+    assert recipe["lock"] == "date-bounded" and len(recipe["lockfile_sha256"]) == 64
+    assert (
+        recipe["lockfile_sha256"] == hashlib.sha256((out / "Cargo.lock").read_bytes()).hexdigest()
+    )
     assert session.closed and session.steps == [
         "generate-lockfile",
         "pin-round-1",
