@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import shlex
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 from cargorewind import rewind as rewind_module
 from cargorewind.backend import BuildResult, Overlay, ReplayBackend, RunResult
 from cargorewind.buildcache import BuildCache
+from cargorewind.bundle import read_task
 from cargorewind.crateindex import DirectoryIndex
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
 from cargorewind.dockerfile import PROBE_MARKER
@@ -246,9 +248,7 @@ def test_rewind_synthetic_crate_end_to_end(
         "target": "unknown",
         "name": "tests::two",
         "command": "cargo test -- --exact tests::two",
-        "base": "missing",
-        "before": "failed",
-        "after": "passed",
+        "statuses": {"base": "missing", "before": "failed", "after": "passed"},
         "reruns": {"before": ["failed"] * 3, "after": ["passed"] * 3},
     }
     assert task["flaky"] == []
@@ -272,6 +272,38 @@ def test_rewind_synthetic_crate_end_to_end(
     assert backend.overlays["after"].files["src/lib.rs"].decode() == FIXED
     assert any(line.startswith("toolchain 1.70.0") for line in lines)
     assert not any("first parent" in line for line in lines)
+
+
+def test_rewind_writes_a_self_contained_bundle(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", base=base)
+    rewind(options, SubprocessRunner(), ScriptedBackend(PASSING), lambda _: None)
+    task = json.loads((out / "task.json").read_text())
+    assert task["schema_version"] == 2
+    assert (out / "fail_to_pass.txt").read_text() == "tests::two\n"
+    assert (out / "pass_to_pass.txt").read_text() == "tests::zero\n"
+    # The base tree travels as a one-commit git bundle whose tree id is the base
+    # commit's, and task.json lists the sha256 of every other file.
+    assert task["base_tree"]["file"] == "base.bundle"
+    assert task["base_tree"]["tree"] == repo.git("rev-parse", f"{base}^{{tree}}").strip()
+    heads = repo.git("bundle", "list-heads", str(out / "base.bundle"))
+    assert heads.split() == [task["base_tree"]["commit"], "refs/heads/cargorewind-bundle"]
+    work = ["git", "-C", str(tmp_path / "work" / "repo"), "branch", "--list", "cargorewind-bundle"]
+    assert subprocess.run(work, check=True, capture_output=True, text=True).stdout == ""
+    assert set(task["files"]) >= {"Dockerfile", "base.bundle", "logs/rerun-after.log"}
+    digest = hashlib.sha256((out / "fix.patch").read_bytes()).hexdigest()
+    assert task["files"]["fix.patch"] == digest and "task.json" not in task["files"]
+    assert read_task(out / "task.json").fail_to_pass == ["tests::two"]
+    # The same base commit gives the same root commit on every run.
+    again = RewindOptions(str(repo.path), fix, tmp_path / "again", tmp_path / "work", base=base)
+    rewind(again, SubprocessRunner(), ScriptedBackend(PASSING), lambda _: None)
+    assert (
+        json.loads((tmp_path / "again" / "task.json").read_text())["base_tree"] == task["base_tree"]
+    )
 
 
 def test_rewind_probes_and_recipe_of_the_synthetic_crate(
@@ -486,7 +518,7 @@ def test_rewind_without_reruns_and_with_a_base_rerun_for_a_compile_error(
     assert "tests::triple_works" not in backend.scripts["rerun-base"]
     task = json.loads((out / "task.json").read_text())
     assert task["runs"]["before"]["state"] == "compile-error"
-    assert task["tests"]["tests::triple_works"]["before"] == "compile-error"
+    assert task["tests"]["tests::triple_works"]["statuses"]["before"] == "compile-error"
     assert task["tests"]["tests::zero"]["reruns"] == {
         "base": ["passed"] * 2,
         "after": ["passed"] * 2,

@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vipul21435/cargorewind/schemas/task.schema.json",
+  "title": "CargoRewind task bundle (task.json), schema version 2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generator", "repo", "base_commit", "fix_commit", "commit_date",
+    "toolchain", "image", "image_source", "lockfile", "lock_report", "vendored",
+    "test_command", "recipe", "image_tag", "build_cache", "probes", "split", "base_tree",
+    "toolchain_report", "runs", "reruns", "tests", "FAIL_TO_PASS", "PASS_TO_PASS",
+    "regressions", "still_failing", "flaky", "verified", "files"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "generator": { "type": "string", "pattern": "^cargorewind " },
+    "repo": { "type": "string", "minLength": 1 },
+    "base_commit": { "$ref": "#/$defs/commit" },
+    "fix_commit": { "$ref": "#/$defs/commit" },
+    "commit_date": { "type": "string", "format": "date-time" },
+    "toolchain": {
+      "type": "object",
+      "required": ["version", "source", "reason", "image_version", "rustup_install",
+                   "components", "targets", "profile", "toolchain_file", "decisions"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "source": { "type": "string" },
+        "reason": { "type": "string" },
+        "image_version": { "type": "string" },
+        "rustup_install": { "type": "boolean" },
+        "components": { "$ref": "#/$defs/strings" },
+        "targets": { "$ref": "#/$defs/strings" },
+        "profile": { "type": ["string", "null"] },
+        "toolchain_file": { "type": ["string", "null"] },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["step", "outcome", "reason"],
+            "properties": {
+              "step": { "type": "string" },
+              "outcome": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "image": { "type": "string", "pattern": "@sha256:[0-9a-f]{64}$" },
+    "image_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "reason"],
+      "properties": {
+        "source": { "enum": ["offline-table", "registry", "cache", "override"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "lockfile": { "enum": ["committed", "generated", "date-bounded"] },
+    "lock_report": { "const": "lock.json" },
+    "vendored": { "type": "boolean" },
+    "test_command": { "type": "string", "pattern": "^cargo test" },
+    "recipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "report"],
+      "properties": {
+        "hash": { "$ref": "#/$defs/sha256" },
+        "report": { "const": "recipe.json" }
+      }
+    },
+    "image_tag": { "type": "string", "pattern": "^cargorewind/[a-z0-9._-]+:[0-9a-f]{16}$" },
+    "build_cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": { "enum": ["hit", "miss", "off"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifiers", "skipped", "container_checks", "ok", "report"],
+      "properties": {
+        "identifiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "name", "patch", "path", "line"],
+            "properties": {
+              "kind": { "enum": ["fn", "struct", "enum", "trait", "const", "macro_rules"] },
+              "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+              "patch": { "enum": ["test", "fix"] },
+              "path": { "type": "string", "minLength": 1 },
+              "line": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "container_checks": {
+          "type": "object",
+          "additionalProperties": { "enum": ["passed", "failed", "no probe"] },
+          "propertyNames": { "enum": ["build", "before", "after"] }
+        },
+        "ok": { "type": "boolean" },
+        "report": { "const": "probes.json" }
+      }
+    },
+    "split": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["test_files", "fix_files", "shared_files", "cfg_test_hunks", "notes", "report"],
+      "properties": {
+        "test_files": { "$ref": "#/$defs/strings" },
+        "fix_files": { "$ref": "#/$defs/strings" },
+        "shared_files": { "$ref": "#/$defs/strings" },
+        "cfg_test_hunks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "old_start", "new_start", "test_lines", "fix_lines"],
+            "properties": {
+              "path": { "type": "string" },
+              "old_start": { "type": "integer", "minimum": 0 },
+              "new_start": { "type": "integer", "minimum": 0 },
+              "test_lines": { "type": "integer", "minimum": 0 },
+              "fix_lines": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "notes": { "$ref": "#/$defs/strings" },
+        "report": { "const": "split.json" }
+      }
+    },
+    "base_tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "commit", "tree"],
+      "properties": {
+        "file": { "const": "base.bundle" },
+        "commit": { "$ref": "#/$defs/commit" },
+        "tree": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "toolchain_report": { "const": "toolchain.json" },
+    "runs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "before", "after"],
+      "properties": {
+        "base": { "$ref": "#/$defs/run" },
+        "before": { "$ref": "#/$defs/run" },
+        "after": { "$ref": "#/$defs/run" }
+      }
+    },
+    "reruns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rounds", "test_timeout", "stages"],
+      "properties": {
+        "rounds": { "type": "integer", "minimum": 0 },
+        "test_timeout": { "type": "integer", "minimum": 1 },
+        "stages": {
+          "type": "object",
+          "propertyNames": { "enum": ["base", "before", "after"] },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tests", "exit_code", "timed_out", "changed", "log"],
+            "properties": {
+              "tests": { "type": "integer", "minimum": 0 },
+              "exit_code": { "type": "integer" },
+              "timed_out": { "type": "boolean" },
+              "changed": { "type": "integer", "minimum": 0 },
+              "log": { "type": "string", "pattern": "^logs/rerun-(base|before|after)\\.log$" }
+            }
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "name", "command", "statuses", "reruns"],
+        "properties": {
+          "target": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "command": { "type": "string", "pattern": "^cargo test" },
+          "statuses": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["base", "before", "after"],
+            "properties": {
+              "base": { "$ref": "#/$defs/status" },
+              "before": { "$ref": "#/$defs/status" },
+              "after": { "$ref": "#/$defs/status" }
+            }
+          },
+          "reruns": {
+            "type": "object",
+            "propertyNames": { "enum": ["base", "before", "after"] },
+            "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/status" } }
+          }
+        }
+      }
+    },
+    "FAIL_TO_PASS": { "$ref": "#/$defs/test_ids" },
+    "PASS_TO_PASS": { "$ref": "#/$defs/test_ids" },
+    "regressions": { "$ref": "#/$defs/test_ids" },
+    "still_failing": { "$ref": "#/$defs/test_ids" },
+    "flaky": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "reason"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "verified": { "type": "boolean" },
+    "files": {
+      "type": "object",
+      "required": ["Dockerfile", "test.patch", "fix.patch", "fail_to_pass.txt",
+                   "pass_to_pass.txt", "base.bundle", "recipe.json"],
+      "additionalProperties": { "$ref": "#/$defs/sha256" }
+    }
+  },
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "strings": { "type": "array", "items": { "type": "string" } },
+    "test_ids": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "status": { "enum": ["passed", "failed", "ignored", "compile-error", "timeout", "missing"] },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_code", "timed_out", "state", "passed", "failed", "ignored"],
+      "properties": {
+        "exit_code": { "type": "integer" },
+        "timed_out": { "type": "boolean" },
+        "state": { "enum": ["ran", "compile-error", "timeout", "probe-failed"] },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "ignored": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test cov demo split-demo toolchain-demo lock-demo lock-demo-live record-lock-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
+.PHONY: install lint format typecheck test cov demo verify-demo verify-live split-demo toolchain-demo lock-demo lock-demo-live record-lock-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
 
 IMAGE ?= cargorewind:dev
 DEMO_ARGS = examples/strsim/strsim-rs.bundle --fix 605c81c9b9
@@ -27,6 +27,15 @@ cov:
 # Offline: replays the recorded Docker runs of the strsim-rs fix (no Docker needed).
 demo:
 	uv run cargorewind rewind $(DEMO_ARGS) --out out/demo --replay examples/strsim/transcript.json
+
+# Offline: rebuild the task from the bundle `make demo` wrote, replaying the same recorded runs.
+verify-demo: demo
+	uv run cargorewind verify out/demo --replay examples/strsim/transcript.json
+
+# Live: rebuild the task from the bundle alone (base.bundle + Dockerfile) through Docker.
+verify-live:
+	uv run cargorewind verify out/demo-live --out out/demo-live/verify
+	$(MAKE) docker-prune
 
 # Offline: split the strsim-rs fix into test.patch and fix.patch and write split.json.
 split-demo:

@@ -203,6 +203,60 @@ def test_cache_list_and_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert "Cannot connect to the Docker daemon" in failed.output
 
 
+def test_verify_command_replays_the_demo_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = str(DEMO / "transcript.json")
+    made = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", transcript))
+    assert made.exit_code == 0, made.output
+    bundle = tmp_path / "out"
+    args = ["verify", str(bundle), "--replay", transcript, "--workdir", str(tmp_path / "vw")]
+    result = runner.invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert "check     files: ok (17 file(s) match their sha256 in task.json)" in result.stdout
+    assert "FAIL_TO_PASS  2 (recorded 2)" in result.stdout
+    assert "checks        6 (all passed)" in result.stdout
+    assert "verdict       VERIFIED from the bundle alone" in result.stdout
+    assert f"report        {bundle / 'verify'}/ (verify.json, logs/)" in result.stdout
+    assert json.loads((bundle / "verify" / "verify.json").read_text())["verified"] is True
+
+    # A bundle whose recorded lists no longer match is NOT VERIFIED (exit 2).
+    task_path = bundle / "task.json"
+    task = json.loads(task_path.read_text())
+    task["PASS_TO_PASS"] = task["PASS_TO_PASS"][:-1]
+    task_path.write_text(json.dumps(task))
+    changed = runner.invoke(cli.app, [*args, "--out", str(tmp_path / "v2"), "--reruns", "0"])
+    assert changed.exit_code == 2, changed.output
+    assert "checks        6 (FAILED: PASS_TO_PASS)" in changed.stdout
+    assert "verdict       NOT VERIFIED from the bundle alone" in changed.stdout
+
+    # A bundle that fails a consistency check is an error (exit 1) before any build.
+    (bundle / "Dockerfile").write_text("FROM scratch\n")
+    broken = runner.invoke(cli.app, args)
+    assert broken.exit_code == 1
+    assert (
+        "error: the bundle is inconsistent (files, dockerfile); nothing was built" in broken.output
+    )
+
+    # A live verify goes through the build cache, like rewind.
+    captured: list[Any] = []
+
+    def fake_verify(options: Any, *rest: Any) -> Any:
+        captured.append(options)
+        raise cli.BundleError("stop here")
+
+    monkeypatch.setattr(cli, "verify", fake_verify)
+    live = runner.invoke(cli.app, ["verify", str(bundle), "--cache-dir", str(tmp_path / "c")])
+    assert live.exit_code == 1 and "stop here" in live.output
+    options = captured[0]
+    assert isinstance(options.cache, BuildCache)
+    assert options.cache.directory == tmp_path / "c"
+    assert options.out == bundle / "verify" and options.reruns is None
+    assert options.workdir == Path(".cargorewind") / f"verify-{bundle.name}"
+    off = runner.invoke(cli.app, ["verify", str(bundle), "--no-build-cache", "--rebuild"])
+    assert off.exit_code == 1 and captured[1].cache is None and captured[1].rebuild
+
+
 def test_rewind_rejects_conflicting_or_unpinned_options(tmp_path: Path) -> None:
     both = runner.invoke(cli.app, _demo_args(tmp_path, "--record", "a", "--replay", "b"))
     assert both.exit_code == 2
@@ -248,7 +302,10 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     assert "reruns        2 x by exact name (2 in after)" in again.stdout
     assert "flaky         1: b" in again.stdout
     assert "NOT VERIFIED" in result.stdout
-    assert "lock.json, Cargo.lock, probes.json, recipe.json, Dockerfile" in result.stdout
+    assert (
+        "base.bundle, split.json, toolchain.json, lock.json, Cargo.lock, probes.json"
+        in result.stdout
+    )
     assert "probes        none (no new identifier to probe)" in result.stdout
 
 

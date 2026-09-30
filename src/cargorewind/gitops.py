@@ -194,6 +194,49 @@ class Git:
         finally:
             tar_path.unlink(missing_ok=True)
 
+    def tree_id(self, rev: str) -> str:
+        return self._out("rev-parse", f"{rev}^{{tree}}").strip()
+
+    def bundle_tree(self, rev: str, dest: Path, ref: str = "refs/heads/cargorewind-bundle") -> str:
+        """Write a git bundle holding one root commit whose tree is the tree of ``rev``.
+
+        The commit has no parents, so the bundle carries the base tree and nothing of
+        the history; its author, committer and date are fixed (the committer date of
+        ``rev``), so the commit id is the same on every run. Returns that commit id.
+        """
+        stamp = self.commit_date(rev).isoformat()
+        env = {
+            "GIT_AUTHOR_NAME": "cargorewind",
+            "GIT_AUTHOR_EMAIL": "cargorewind@localhost",
+            "GIT_COMMITTER_NAME": "cargorewind",
+            "GIT_COMMITTER_EMAIL": "cargorewind@localhost",
+            "GIT_AUTHOR_DATE": stamp,
+            "GIT_COMMITTER_DATE": stamp,
+        }
+        argv = ["git", "-C", str(self.repo), "commit-tree", self.tree_id(rev), "-m"]
+        result = checked(self.runner.run([*argv, f"cargorewind: tree of {rev}"], env=env))
+        commit = result.stdout.strip()
+        checked(self._run("update-ref", ref, commit))
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            checked(self._run("bundle", "create", str(dest.resolve()), ref))
+        finally:
+            self._run("update-ref", "-d", ref)
+        return commit
+
+    def commit_all(self, message: str) -> str:
+        """Stage every file of the working tree (ignore rules aside) and commit it."""
+        checked(self._run("add", "--all", "--force"))
+        env = {
+            "GIT_AUTHOR_NAME": "cargorewind",
+            "GIT_AUTHOR_EMAIL": "cargorewind@localhost",
+            "GIT_COMMITTER_NAME": "cargorewind",
+            "GIT_COMMITTER_EMAIL": "cargorewind@localhost",
+        }
+        argv = ["git", "-C", str(self.repo), "-c", "commit.gpgsign=false", "commit"]
+        checked(self.runner.run([*argv, "--quiet", "--allow-empty", "-m", message], env=env))
+        return self.rev_parse("HEAD")
+
     def checkout_clean(self, rev: str) -> None:
         """Force the working tree to exactly ``rev`` (detached, untracked files removed)."""
         checked(self._run("checkout", "--quiet", "--force", "--detach", rev))

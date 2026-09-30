@@ -409,6 +409,36 @@ green, pushed, and the README describes it with real output.
   is not preceded by `*`, so a raw pointer to a path (`*const std::ffi::c_void`) no
   longer becomes a bogus `const std`.
 
+### Decisions made while building slice 6 (2026-09-30)
+
+- `task.json` is schema 2, typed twice: dataclasses in `bundle.py` (what the pipeline
+  fills and `verify` reads) and a JSON Schema 2020-12 document packaged as
+  `cargorewind/schemas/task.schema.json` (`additionalProperties: false` everywhere,
+  enums for statuses, states and strategies, sha256 and commit patterns), checked with
+  `jsonschema` on every write and read. Per-stage test statuses moved under
+  `tests.<id>.statuses`; `FAIL_TO_PASS` and `PASS_TO_PASS` keep their names.
+- The bundle carries the base tree as `base.bundle`: a git bundle with one root commit
+  made by `git commit-tree` from the base commit's tree, with fixed author, committer
+  and date, so its id is reproducible and the tree id equals the base commit's (both
+  are recorded under `base_tree` and checked by `verify`). It holds no history, so it
+  is as small as the tree; `git clone` of it warns about a missing HEAD, which is
+  harmless. `task.json` also records the sha256 of every other bundle file
+  (`files`), `fail_to_pass.txt` and `pass_to_pass.txt` list one id per line.
+- `cargorewind verify <bundle>` reads nothing outside the bundle: it checks the
+  manifest, that `recipe.json` hashes to the recorded hash and renders the bundle's
+  `Dockerfile` byte for byte (plus the lockfile's sha256 for a date-bounded recipe and
+  the probe words), clones `base.bundle`, applies both patches and commits the result
+  so the rest of the pipeline (overlays, targets, probes, stages, reruns) runs
+  unchanged, and compares the new lists with the recorded ones. An inconsistent
+  bundle is an error before any build (exit 1); a flip or a list that does not hold
+  again is NOT VERIFIED (exit 2). It writes `verify.json` and its logs into
+  `<bundle>/verify/` by default, never into the manifest's files. The strsim-rs
+  transcript replays a verify as well as a rewind (same Dockerfile, overlays and
+  scripts), so `make verify-demo` is offline.
+- `rewind.py` exposes the shared execution (`run_stages`, `rerun_candidates`,
+  `execute`, `build_image`, `targets_of`) over an `Execution` protocol that both
+  reports implement.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.

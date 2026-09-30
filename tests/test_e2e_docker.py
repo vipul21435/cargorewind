@@ -16,6 +16,7 @@ from cargorewind.dockerfile import render_dockerfile
 from cargorewind.gitops import Git
 from cargorewind.rewind import RewindOptions, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
+from cargorewind.verify import VerifyOptions, verify
 
 DEMO = Path(__file__).resolve().parents[1] / "examples" / "strsim"
 
@@ -99,6 +100,36 @@ def test_live_build_cache_reuses_the_labelled_image(tmp_path: Path) -> None:
     ).stdout.strip()
     assert label == second.recipe.hash
     assert list(cache.entries()) == [second.recipe.hash]
+
+
+@pytest.mark.docker
+def test_live_verify_rebuilds_the_strsim_bundle(tmp_path: Path) -> None:
+    """`verify` rebuilds the environment from the bundle's base.bundle and Dockerfile,
+    runs the three stages and the reruns, and finds the recorded lists again."""
+    runner = SubprocessRunner()
+    cache = BuildCache(tmp_path / "cache", runner)
+    options = RewindOptions(
+        str(DEMO / "strsim-rs.bundle"),
+        "605c81c9b9",
+        tmp_path / "out",
+        tmp_path / "work",
+        cache=cache,
+    )
+    made = rewind(options, runner, DockerBackend(runner, timeout=1800), print)
+    assert made.verified
+    verified = verify(
+        VerifyOptions(tmp_path / "out", tmp_path / "out" / "verify", tmp_path / "vw", cache=cache),
+        runner,
+        DockerBackend(runner, timeout=1800),
+        print,
+    )
+    assert verified.verified
+    assert verified.build is not None and verified.build.cache == "hit"
+    assert verified.flip is not None
+    assert verified.flip.fail_to_pass == made.flip.fail_to_pass  # type: ignore[union-attr]
+    assert [c.ok for c in verified.checks] == [True] * 6
+    document = json.loads((tmp_path / "out" / "verify" / "verify.json").read_text())
+    assert document["verified"] is True and document["runs"]["before"]["failed"] == 2
 
 
 @pytest.mark.docker

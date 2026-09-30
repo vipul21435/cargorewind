@@ -7,11 +7,30 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Protocol
 
-from cargorewind import __version__
 from cargorewind.backend import Backend, BuildResult, Overlay, RunResult
 from cargorewind.buildcache import BuildCache, BuildRequest
+from cargorewind.bundle import (
+    BASE_BUNDLE,
+    BaseTree,
+    BuildCacheInfo,
+    CfgTestHunk,
+    FlakyTest,
+    ImageSource,
+    ProbeIdentifier,
+    ProbeSummary,
+    RecipeRef,
+    RerunSection,
+    RerunSummary,
+    RunSummary,
+    SplitSummary,
+    Task,
+    TestRow,
+    manifest,
+    write_task,
+    write_test_lists,
+)
 from cargorewind.crateindex import CrateIndex
 from cargorewind.dockerfile import (
     PROBE_EXIT_CODE,
@@ -59,7 +78,6 @@ from cargorewind.testtargets import TargetMap, rerun_command
 from cargorewind.toolchain import TOOLCHAIN_FILES, Decision, Toolchain
 from cargorewind.toolchainreport import choose_image, infer_toolchain, toolchain_document
 
-TASK_SCHEMA = 1
 DEFAULT_RERUNS = 3
 DEFAULT_TEST_TIMEOUT = 300  # seconds per rerun command
 
@@ -111,6 +129,70 @@ class RerunRun:
     changed: int  # tests whose outcome differed from the stage run in some round
 
 
+class Execution(Protocol):
+    """What the three stage runs and the reruns fill in: shared by ``rewind`` (a fresh
+    task) and ``verify`` (a task rebuilt from its bundle)."""
+
+    recipe: Recipe
+    probes: ProbeReport
+    runs: dict[str, StageRun]
+    reruns: dict[str, RerunRun]
+    rerun_rounds: int
+    test_timeout: int
+
+    @property
+    def tag(self) -> str: ...
+
+
+def run_summaries(runs: dict[str, StageRun]) -> dict[str, RunSummary]:
+    return {
+        name: RunSummary(
+            run.result.exit_code, run.result.timed_out, run.tests.state, **run.tests.counts()
+        )
+        for name, run in runs.items()
+    }
+
+
+def rerun_section(state: Execution) -> RerunSection:
+    return RerunSection(
+        state.rerun_rounds,
+        state.test_timeout,
+        {
+            name: RerunSummary(
+                len(run.items),
+                run.result.exit_code,
+                run.result.timed_out,
+                run.changed,
+                f"logs/rerun-{name}.log",
+            )
+            for name, run in state.reruns.items()
+        },
+    )
+
+
+def tests_table(state: Execution, flip: Flip) -> dict[str, TestRow]:
+    """Every test seen in any run: its target, the command that reruns it, its status
+    per stage and the rerun outcomes."""
+    table: dict[str, TestRow] = {}
+    for test_id, key in sorted(flip.keys.items()):
+        target, name = key
+        raw = next(
+            (r.tests.results[key].raw for r in state.runs.values() if key in r.tests.results),
+            name,
+        )
+        table[test_id] = TestRow(
+            target.label,
+            name,
+            " ".join(rerun_command(target, raw, state.recipe.test_command)),
+            {stage: run.tests.status(key).value for stage, run in state.runs.items()},
+            {
+                stage: [s.value for s in seen]
+                for stage, seen in flip.reruns.get(test_id, {}).items()
+            },
+        )
+    return table
+
+
 @dataclass
 class RewindReport:
     source: str
@@ -124,11 +206,16 @@ class RewindReport:
     recipe: Recipe
     build: BuildOutcome
     probes: ProbeReport
+    base_tree: BaseTree
     runs: dict[str, StageRun] = field(default_factory=dict)
     reruns: dict[str, RerunRun] = field(default_factory=dict)
     rerun_rounds: int = 0
     test_timeout: int = DEFAULT_TEST_TIMEOUT
     flip: Flip | None = None
+
+    @property
+    def tag(self) -> str:
+        return self.build.tag
 
     @property
     def image_id(self) -> str:
@@ -139,106 +226,52 @@ class RewindReport:
         """The flip holds and every sanity probe passed."""
         return self.flip is not None and self.flip.verified and self.probes.ok
 
-    def task(self) -> dict[str, Any]:
-        """The task.json document."""
+    def task(self, files: dict[str, str]) -> Task:
+        """The task.json document; ``files`` is the bundle manifest."""
         assert self.flip is not None
-        return {
-            "schema_version": TASK_SCHEMA,
-            "generator": f"cargorewind {__version__}",
-            "repo": self.source,
-            "base_commit": self.base,
-            "fix_commit": self.fix,
-            "commit_date": self.commit_date,
-            "toolchain": self.toolchain.as_dict(),
-            "image": self.image.reference,
-            "image_source": {"source": self.image.source, "reason": self.image.reason},
-            "lockfile": self.lock.strategy.value,
-            "lock_report": "lock.json",
-            "vendored": self.lock.vendor,
-            "test_command": " ".join(self.recipe.test_command),
-            "recipe": {"hash": self.recipe.hash, "report": "recipe.json"},
-            "image_tag": self.build.tag,
-            "build_cache": {"status": self.build.cache, "reason": self.build.reason},
-            "probes": {
-                "identifiers": [p.as_dict() for p in self.probes.probes],
-                "skipped": len(self.probes.skipped),
-                "container_checks": self.probes.container,
-                "ok": self.probes.ok,
-                "report": "probes.json",
-            },
-            "split": {
-                "test_files": sorted(d.path for d in self.split.test_files),
-                "fix_files": sorted(d.path for d in self.split.fix_files),
-                "shared_files": self.split.shared_files,
-                "cfg_test_hunks": [
-                    {
-                        "path": h.path,
-                        "old_start": h.old_start,
-                        "new_start": h.new_start,
-                        "test_lines": h.test_lines,
-                        "fix_lines": h.fix_lines,
-                    }
+        return Task(
+            repo=self.source,
+            base_commit=self.base,
+            fix_commit=self.fix,
+            commit_date=self.commit_date,
+            toolchain=self.toolchain.as_dict(),
+            image=self.image.reference,
+            image_source=ImageSource(self.image.source, self.image.reason),
+            lockfile=self.lock.strategy.value,
+            vendored=self.lock.vendor,
+            test_command=" ".join(self.recipe.test_command),
+            recipe=RecipeRef(self.recipe.hash),
+            image_tag=self.build.tag,
+            build_cache=BuildCacheInfo(self.build.cache, self.build.reason),
+            probes=ProbeSummary(
+                [ProbeIdentifier(**p.as_dict()) for p in self.probes.probes],
+                len(self.probes.skipped),
+                dict(self.probes.container),
+                self.probes.ok,
+            ),
+            split=SplitSummary(
+                sorted(d.path for d in self.split.test_files),
+                sorted(d.path for d in self.split.fix_files),
+                self.split.shared_files,
+                [
+                    CfgTestHunk(h.path, h.old_start, h.new_start, h.test_lines, h.fix_lines)
                     for h in self.split.hunks
                     if h.test_lines
                 ],
-                "notes": self.split.notes,
-                "report": "split.json",
-            },
-            "toolchain_report": "toolchain.json",
-            "runs": {
-                name: {
-                    "exit_code": run.result.exit_code,
-                    "timed_out": run.result.timed_out,
-                    "state": run.tests.state,
-                    **run.tests.counts(),
-                }
-                for name, run in self.runs.items()
-            },
-            "reruns": {
-                "rounds": self.rerun_rounds,
-                "test_timeout": self.test_timeout,
-                "stages": {
-                    name: {
-                        "tests": len(run.items),
-                        "exit_code": run.result.exit_code,
-                        "timed_out": run.result.timed_out,
-                        "changed": run.changed,
-                        "log": f"logs/rerun-{name}.log",
-                    }
-                    for name, run in self.reruns.items()
-                },
-            },
-            "tests": self.tests_table(),
-            "FAIL_TO_PASS": self.flip.fail_to_pass,
-            "PASS_TO_PASS": self.flip.pass_to_pass,
-            "regressions": self.flip.regressions,
-            "still_failing": self.flip.still_failing,
-            "flaky": [{"id": f.id, "reason": f.reason} for f in self.flip.flaky],
-            "verified": self.verified,
-        }
-
-    def tests_table(self) -> dict[str, dict[str, Any]]:
-        """Every test seen in any run: its target, the command that reruns it, its
-        status per stage and the rerun outcomes."""
-        assert self.flip is not None
-        table: dict[str, dict[str, Any]] = {}
-        for test_id, key in sorted(self.flip.keys.items()):
-            target, name = key
-            raw = next(
-                (r.tests.results[key].raw for r in self.runs.values() if key in r.tests.results),
-                name,
-            )
-            table[test_id] = {
-                "target": target.label,
-                "name": name,
-                "command": " ".join(rerun_command(target, raw, self.recipe.test_command)),
-                **{stage: run.tests.status(key).value for stage, run in self.runs.items()},
-                "reruns": {
-                    stage: [s.value for s in seen]
-                    for stage, seen in self.flip.reruns.get(test_id, {}).items()
-                },
-            }
-        return table
+                list(self.split.notes),
+            ),
+            base_tree=self.base_tree,
+            runs=run_summaries(self.runs),
+            reruns=rerun_section(self),
+            tests=tests_table(self, self.flip),
+            fail_to_pass=self.flip.fail_to_pass,
+            pass_to_pass=self.flip.pass_to_pass,
+            regressions=self.flip.regressions,
+            still_failing=self.flip.still_failing,
+            flaky=[FlakyTest(f.id, f.reason) for f in self.flip.flaky],
+            verified=self.verified,
+            files=files,
+        )
 
 
 def pin_patched_toolchain(toolchain: Toolchain, patched: tuple[str, ...]) -> Toolchain:
@@ -294,19 +327,24 @@ def build_overlays(
     return {"base": Overlay(), "before": before, "after": after}
 
 
-def _build(
-    options: RewindOptions,
-    backend: Backend,
-    context: Path,
-    request: BuildRequest,
-    log: Log,
+@dataclass(frozen=True)
+class BuildPolicy:
+    """Whether builds go through the cache, and whether a cached image is ignored."""
+
+    cache: BuildCache | None = None  # None: always build (Docker's layer cache applies)
+    rebuild: bool = False  # skip the cache lookup and build with --no-cache
+
+
+def build_image(
+    policy: BuildPolicy, backend: Backend, context: Path, request: BuildRequest, log: Log
 ) -> BuildOutcome:
     """Reuse or build the image through the cache, or build it directly without one."""
-    if options.cache is None:
-        result = backend.build(context, request.tag, no_cache=options.rebuild)
+    cache, rebuild = policy.cache, policy.rebuild
+    if cache is None:
+        result = backend.build(context, request.tag, no_cache=rebuild)
         reason = "no build cache (replay, record or --no-build-cache)"
         return BuildOutcome(request.tag, result, "off", reason)
-    cached = options.cache.build(backend, context, request, rebuild=options.rebuild, log=log)
+    cached = cache.build(backend, context, request, rebuild=rebuild, log=log)
     status = "hit" if cached.hit else "miss"
     return BuildOutcome(cached.tag, cached.result, status, cached.reason)
 
@@ -333,7 +371,7 @@ def _environment(
 
 
 @dataclass(frozen=True)
-class _Runtime:
+class Runtime:
     """What the stage runs and the reruns share."""
 
     backend: Backend
@@ -343,54 +381,55 @@ class _Runtime:
     log: Log
 
 
-def _run_stages(report: RewindReport, rt: _Runtime) -> None:
-    probes = report.probes
+def run_stages(state: Execution, rt: Runtime) -> None:
+    """The base, before and after runs of the whole suite, recorded into ``state``."""
+    probes = state.probes
     for stage in STAGES:
         required = probes.required(stage)
-        command = report.recipe.test_command
-        result = rt.backend.run_tests(
-            report.build.tag, stage, rt.overlays[stage], command, required
-        )
+        command = state.recipe.test_command
+        result = rt.backend.run_tests(state.tag, stage, rt.overlays[stage], command, required)
         probes.record_stage(stage, result.output)
         (rt.logs / f"{stage}.log").write_text(result.output)
         probe_failed = result.exit_code == PROBE_EXIT_CODE and PROBE_MARKER in result.output
         tests = stage_tests(stage, result, rt.targets, probe_failed=probe_failed)
-        report.runs[stage] = StageRun(stage, result, tests)
+        state.runs[stage] = StageRun(stage, result, tests)
         counts = tests.counts()
-        state = "" if tests.state == StageState.RAN else f"  ({tests.state})"
+        stage_state = "" if tests.state == StageState.RAN else f"  ({tests.state})"
         rt.log(
             f"run       {stage:<6} exit {result.exit_code:>3}  "
             f"{counts['passed']} passed, {counts['failed']} failed, "
-            f"{counts['ignored']} ignored{state}"
+            f"{counts['ignored']} ignored{stage_state}"
         )
     if probes.words:
         checked = ", ".join(f"{stage} {status}" for stage, status in probes.container.items())
         rt.log(f"probe     in Docker: {checked}")
 
 
-def _rerun(report: RewindReport, rt: _Runtime, flip: Flip, options: RewindOptions) -> Flip:
+def rerun_candidates(
+    state: Execution, rt: Runtime, flip: Flip, rounds: int, test_timeout: int
+) -> Flip:
     """Rerun every FAIL_TO_PASS and PASS_TO_PASS candidate by exact name, N times per
     stage, and take the tests whose outcome changes out of the lists."""
-    stages = {name: run.tests for name, run in report.runs.items()}
-    plan = rerun_plan(flip, stages, report.recipe.test_command)
-    report.rerun_rounds = options.reruns
-    report.test_timeout = options.test_timeout
+    stages = {name: run.tests for name, run in state.runs.items()}
+    plan = rerun_plan(flip, stages, state.recipe.test_command)
+    state.rerun_rounds = rounds
+    state.test_timeout = test_timeout
     seen: dict[str, dict[TestKey, list[Status]]] = {}
     for stage, items in plan.items():
-        script = rerun_script(items, options.reruns, options.test_timeout)
+        script = rerun_script(items, rounds, test_timeout)
         run = f"rerun-{stage}"
-        result = rt.backend.run_script(report.build.tag, run, rt.overlays[stage], script)
+        result = rt.backend.run_script(state.tag, run, rt.overlays[stage], script)
         (rt.logs / f"{run}.log").write_text(result.output)
         statuses = parse_reruns(
-            result.output, items, options.reruns, rt.targets, timed_out=result.timed_out
+            result.output, items, rounds, rt.targets, timed_out=result.timed_out
         )
         seen[stage] = statuses
         changed = sum(
             1 for item in items if set(statuses[item.key]) != {stages[stage].status(item.key)}
         )
-        report.reruns[stage] = RerunRun(stage, result, items, changed)
+        state.reruns[stage] = RerunRun(stage, result, items, changed)
         rt.log(
-            f"rerun     {stage:<6} exit {result.exit_code:>3}  {options.reruns} x "
+            f"rerun     {stage:<6} exit {result.exit_code:>3}  {rounds} x "
             f"{len(items)} test(s) by exact name, {changed} changed outcome"
         )
     final = apply_reruns(flip, stages, seen)
@@ -399,10 +438,18 @@ def _rerun(report: RewindReport, rt: _Runtime, flip: Flip, options: RewindOption
     return final
 
 
-def _targets(git: Git, base: str, split: SplitResult) -> TargetMap:
-    """cargo targets of the fix commit (the split's layout) and of the base commit."""
-    base_layout = Layout(GitTree(git, base), ())
-    packages = [*split.packages, *base_layout.packages]
+def execute(state: Execution, rt: Runtime, rounds: int, test_timeout: int) -> Flip:
+    """The three stage runs, the flip, and the reruns when there is a candidate."""
+    run_stages(state, rt)
+    flip = compute_flip(*(state.runs[s].tests for s in STAGES))
+    if rounds > 0 and (flip.fail_to_pass or flip.pass_to_pass):
+        flip = rerun_candidates(state, rt, flip, rounds, test_timeout)
+    return flip
+
+
+def targets_of(git: Git, base: str, fix: str) -> TargetMap:
+    """cargo targets of the fix commit and of the base commit."""
+    packages = [*Layout(GitTree(git, fix), ()).packages, *Layout(GitTree(git, base), ()).packages]
     return TargetMap(t for package in packages for t in package.targets)
 
 
@@ -441,12 +488,16 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         log(f"recipe    {recipe.hash}")
         tag = recipe_tag(options.source, recipe)
         request = BuildRequest(tag, recipe.hash, options.source, base, recipe.toolchain)
-        build = _build(options, backend, context, request, log)
+        policy = BuildPolicy(options.cache, options.rebuild)
+        build = build_image(policy, backend, context, request, log)
     log(f"build     {build.tag} (cache {build.cache}: {build.reason})")
     probes.container["build"] = "passed" if probes.words else "no probe"
     logs = out / "logs"
     logs.mkdir(exist_ok=True)
     (logs / "build.log").write_text(build.result.log)
+    with git.lock:
+        root = git.bundle_tree(base, out / BASE_BUNDLE)
+    base_tree = BaseTree(BASE_BUNDLE, root, git.tree_id(base))
 
     report = RewindReport(
         options.source,
@@ -460,15 +511,13 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         recipe,
         build,
         probes,
+        base_tree,
     )
-    rt = _Runtime(backend, overlays, _targets(git, base, split), logs, log)
-    _run_stages(report, rt)
-    flip = compute_flip(*(report.runs[s].tests for s in STAGES))
-    if options.reruns > 0 and (flip.fail_to_pass or flip.pass_to_pass):
-        flip = _rerun(report, rt, flip, options)
-    report.flip = flip
+    rt = Runtime(backend, overlays, targets_of(git, base, fix), logs, log)
+    report.flip = execute(report, rt, options.reruns, options.test_timeout)
     _write_probes(out, options.source, base, fix, probes)
-    (out / "task.json").write_text(json.dumps(report.task(), indent=2) + "\n")
+    write_test_lists(out, report.flip.fail_to_pass, report.flip.pass_to_pass)
+    write_task(out / "task.json", report.task(manifest(out)))
     return report
 
 

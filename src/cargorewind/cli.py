@@ -18,6 +18,7 @@ from cargorewind.backend import (
     ReplayError,
 )
 from cargorewind.buildcache import BuildCache, BuildCacheError
+from cargorewind.bundle import BundleError
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
 from cargorewind.deps import LockError
 from cargorewind.dockerfile import LockStrategy, RecipeError
@@ -51,6 +52,7 @@ from cargorewind.toolchainreport import (
     infer_toolchain,
     toolchain_document,
 )
+from cargorewind.verify import VerifyOptions, VerifyReport, verify
 
 app = typer.Typer(
     name="cargorewind",
@@ -118,6 +120,7 @@ TIMEOUT_OPTION = typer.Option("--timeout", help="Seconds allowed per docker buil
 # Errors that end a command with exit code 1 and a one-line message.
 FAILURES = (
     BuildCacheError,
+    BundleError,
     CommandError,
     GitError,
     LockError,
@@ -173,12 +176,31 @@ def _print_summary(report: RewindReport, out: Path) -> None:
     verdict = "VERIFIED" if report.verified else "NOT VERIFIED"
     typer.echo(f"verdict       {verdict} fail-to-pass flip")
     files = (
-        "task.json, split.json, toolchain.json, lock.json, probes.json, recipe.json, "
-        "Dockerfile, patches, logs/"
+        "task.json, fail_to_pass.txt, pass_to_pass.txt, Dockerfile, patches, base.bundle, "
+        "split.json, toolchain.json, lock.json, probes.json, recipe.json, logs/"
     )
     if report.lock.bound is not None:
         files = files.replace("lock.json", "lock.json, Cargo.lock")
     typer.echo(f"bundle        {out}/ ({files})")
+
+
+def _print_verify_summary(report: VerifyReport, out: Path) -> None:
+    flip = report.flip
+    assert flip is not None
+    typer.echo(f"FAIL_TO_PASS  {len(flip.fail_to_pass)} (recorded {len(report.task.fail_to_pass)})")
+    for name in flip.fail_to_pass:
+        typer.echo(f"  {name}")
+    typer.echo(f"PASS_TO_PASS  {len(flip.pass_to_pass)} (recorded {len(report.task.pass_to_pass)})")
+    if flip.regressions:
+        typer.echo(f"regressions   {len(flip.regressions)}: {', '.join(flip.regressions)}")
+    if flip.flaky:
+        typer.echo(f"flaky         {len(flip.flaky)}: {', '.join(f.id for f in flip.flaky)}")
+    failed = report.failed
+    state = "all passed" if not failed else "FAILED: " + ", ".join(c.name for c in failed)
+    typer.echo(f"checks        {len(report.checks)} ({state})")
+    verdict = "VERIFIED" if report.verified else "NOT VERIFIED"
+    typer.echo(f"verdict       {verdict} from the bundle alone")
+    typer.echo(f"report        {out}/ (verify.json, logs/)")
 
 
 @app.command("split")
@@ -348,6 +370,70 @@ def rewind_command(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _print_summary(report, out)
+    if not report.verified:
+        raise typer.Exit(code=EXIT_NOT_VERIFIED)
+
+
+@app.command("verify")
+def verify_command(
+    bundle: Annotated[Path, typer.Argument(help="A task bundle directory written by rewind.")],
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", help="Directory for verify.json and logs (default: <bundle>/verify)."
+        ),
+    ] = None,
+    workdir: Annotated[
+        Path | None,
+        typer.Option("--workdir", help="Checkout and build context (default: .cargorewind/)."),
+    ] = None,
+    record: Annotated[Path | None, RECORD_OPTION] = None,
+    replay: Annotated[Path | None, REPLAY_OPTION] = None,
+    timeout: Annotated[float, TIMEOUT_OPTION] = 3600.0,
+    cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None,
+    build_cache: Annotated[
+        bool,
+        typer.Option(
+            "--build-cache/--no-build-cache",
+            help="Reuse the image of the bundle's recipe. Always off with --record and --replay.",
+        ),
+    ] = True,
+    rebuild: Annotated[
+        bool,
+        typer.Option("--rebuild", help="Ignore a cached image and build with --no-cache."),
+    ] = False,
+    reruns: Annotated[
+        int | None,
+        typer.Option("--reruns", min=0, help="Rerun rounds (default: as recorded in task.json)."),
+    ] = None,
+    test_timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--test-timeout", min=1, help="Seconds per rerun command (default: recorded)."
+        ),
+    ] = None,
+) -> None:
+    """Rebuild a task from its bundle alone (no clone) and check that the flip still holds."""
+    backend = _backend(record, replay, timeout)
+    cache = None
+    if build_cache and record is None and replay is None:
+        cache = BuildCache(cache_dir or default_cache_dir(), SubprocessRunner())
+    out = out or bundle / "verify"
+    options = VerifyOptions(
+        bundle=bundle,
+        out=out,
+        workdir=workdir or Path(".cargorewind") / f"verify-{repo_slug(str(bundle.resolve()))}",
+        cache=cache,
+        rebuild=rebuild,
+        reruns=reruns,
+        test_timeout=test_timeout,
+    )
+    try:
+        report = verify(options, SubprocessRunner(), backend, typer.echo)
+    except FAILURES as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    _print_verify_summary(report, out)
     if not report.verified:
         raise typer.Exit(code=EXIT_NOT_VERIFIED)
 
