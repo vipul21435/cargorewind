@@ -211,6 +211,9 @@ table.
   until a line that is only a status. A test that started and never reported failed
   (the binary died) or timed out (the run was stopped). Doctest names get a per-item
   ordinal instead of the line number, so they stay stable when a patch shifts lines.
+  A doctest of the crate's own docs is `src/lib.rs - (crate)`, whether rustdoc prints
+  it as `src/lib.rs - (line 1)` (1.73) or with two spaces, `src/lib.rs -  (line 1)`
+  (1.39, checked with a real run).
   The fixtures are real `cargo test` outputs of an original crate that produces every
   one of those lines (`tests/fixtures/libtest/zoo`), recorded on rust 1.39.0, 1.73.0
   and 1.98.1 in text, `--nocapture --test-threads=1` and JSON form; all nine
@@ -1162,14 +1165,14 @@ flowchart LR
 
 | What | Number | Command |
 | --- | --- | --- |
-| Tests (no Docker) | 651 passed, 6 Docker tests deselected | `make cov` |
+| Tests (no Docker) | 655 passed, 6 Docker tests deselected | `make cov` |
 | Line and branch coverage of `src/` | 98.82% (gate: 90%) | `make cov` |
 | Bundle schema, verify and batch tests (plus 3 CLI tests) | 59 passed | `uv run pytest tests/test_bundle.py tests/test_verify.py tests/test_batch.py` |
 | Offline batch of `examples/batch.toml` (2 replayed rewinds, 1 duplicate), fresh work directory | 1.82 s wall (median of 3) | `rm -rf .cargorewind out/batch && time make batch-demo` |
 | Offline verify of the demo bundle | 0.50 s wall (median of 3) | `time uv run cargorewind verify out/demo --replay examples/strsim/transcript.json` after `make demo` |
 | Live batch of `examples/batch.toml` through Docker, images cached by label | 3 min 42 s wall: strsim-rs 24.5 s, semver 197.4 s (pin loop included), duplicate 0 s; 2 verified, 1 duplicate | `time uv run cargorewind batch examples/batch.toml --live --out out/batch-live --cache-dir <dir>` (numbers from `summary.md`) |
 | First live semver `d92a4d8` rewind (toolchain stage and `rust:1.68.0-slim` present, final image built) | 6 min 0 s wall; FAIL_TO_PASS 1, PASS_TO_PASS 34, 1 pin | `time uv run cargorewind rewind examples/semver/semver.bundle --fix d92a4d8 --registry --cache-dir <dir> --record <file>` |
-| libtest parser, target resolution, flip and rerun tests | 58 passed (9 recorded runs of 3 toolchains) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
+| libtest parser, target resolution, flip and rerun tests | 61 passed (9 recorded runs of 3 toolchains) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
 | Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
 | One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:edcbd61bae401cff sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
 | Recipe, golden Dockerfile, probe and build cache tests | 75 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |

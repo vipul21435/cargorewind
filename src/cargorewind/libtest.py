@@ -19,8 +19,9 @@ Names: the mode suffix libtest adds for display (`` - should panic``,
 `` - compile fail``, `` - compile``) is not part of the name. Doctest names embed a line
 number (``src/lib.rs - f (line 12)``) that shifts whenever a patch adds lines above it,
 so the stable name replaces it with an ordinal per item and binary (``src/lib.rs - f``,
-then ``src/lib.rs - f #2``; ``src/lib.rs - (crate)`` for the crate's own docs); the raw
-name is kept for reruns.
+then ``src/lib.rs - f #2``; ``src/lib.rs - (crate)`` for the crate's own docs, which old
+rustdoc prints as ``src/lib.rs -  (line 1)`` and newer as ``src/lib.rs - (line 1)``); the
+raw name is kept for reruns.
 """
 
 from __future__ import annotations
@@ -57,12 +58,13 @@ _SUMMARY = re.compile(
     r"(?: (?P<allowed_fail>\d+) allowed to fail;)? (?P<ignored>\d+) ignored; "
     r"(?P<measured>\d+) measured; (?P<filtered_out>\d+) filtered out"
 )
-_NAME = r"(?P<name>\S+ - (?:.+? )?\(line \d+\)|\S+)"
+_NAME = r"(?P<name>\S+ - (?:.*? )?\(line \d+\)|\S+)"
 _MODE = r"(?: - (?:should panic(?: with .*?)?|compile fail|compile))?"
 _TEST = re.compile(rf"\btest {_NAME}{_MODE} \.\.\.(?: (?P<rest>.*))?$")
 _STATUS = re.compile(r"(?P<status>ok|FAILED|ignored(?:, .*)?|bench: .*)(?: <[\d.]+s>)?")
-# A doctest in the crate's own docs has no item: ``src/lib.rs - (line 8)``.
-_DOCTEST = re.compile(r"^(?P<file>.+?) - (?:(?P<item>.+?) )?\(line (?P<line>\d+)\)$")
+# A doctest in the crate's own docs has no item: ``src/lib.rs - (line 8)``, or with the
+# empty item still followed by its space, ``src/lib.rs -  (line 8)`` (rustdoc 1.39).
+_DOCTEST = re.compile(r"^(?P<file>.+?) - (?:(?P<item>.*?) )?\(line (?P<line>\d+)\)$")
 CRATE_DOCTEST = "(crate)"  # stands in for the missing item in the stable name
 _HASH = re.compile(r"-[0-9a-f]{16}$")
 _COMPILE_ERROR = re.compile(r"^error(?:\[E\d+\])?: |^error: could not compile", re.MULTILINE)

@@ -286,3 +286,34 @@ def test_apply_reruns_keeps_a_test_that_fails_before_in_a_different_way() -> Non
 def test_no_rerun_data_changes_nothing() -> None:
     flip = Flip(["a"], ["b"], [], [], keys={"a": (LIB, "a"), "b": (LIB, "b")})
     assert apply_reruns(flip, _stages(), {}) == flip
+
+
+def test_a_broken_crate_doctest_of_old_rustdoc_is_a_regression() -> None:
+    # rust 1.39 prints a doctest of the crate's own docs as `src/lib.rs -  (line N)`.
+    def run(crate_doc: str) -> RunResult:
+        return RunResult(
+            0 if crate_doc == "ok" else 101,
+            "     Running target/debug/deps/b-0123456789abcdef\n"
+            "running 1 test\ntest tests::t ... ok\n"
+            "   Doc-tests b\n\nrunning 2 tests\n"
+            f"test src/lib.rs -  (line 1) ... {crate_doc}\n"
+            "test src/lib.rs - two (line 5) ... ok\n",
+        )
+
+    targets = TargetMap([Target("lib", "b", "src/lib.rs")])
+    stages = {
+        "base": stage_tests("base", run("ok"), targets),
+        "before": stage_tests("before", run("ok"), targets),
+        "after": stage_tests("after", run("FAILED"), targets),
+    }
+    flip = compute_flip(stages["base"], stages["before"], stages["after"])
+    assert flip.regressions == ["src/lib.rs - (crate)"] and not flip.verified
+    assert flip.pass_to_pass == ["src/lib.rs - two", "tests::t"]
+    # Kept as PASS_TO_PASS when it passes after, and rerun with its file as the filter.
+    stages["after"] = stage_tests("after", run("ok"), targets)
+    flip = compute_flip(stages["base"], stages["before"], stages["after"])
+    assert "src/lib.rs - (crate)" in flip.pass_to_pass
+    plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
+    crate_doc = next(r for r in plan["after"] if r.id == "src/lib.rs - (crate)")
+    assert crate_doc.command == ("cargo", "test", "--doc", "--", "src/lib.rs")
+    assert crate_doc.raw == "src/lib.rs -  (line 1)"

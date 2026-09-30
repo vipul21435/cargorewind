@@ -306,3 +306,35 @@ def test_summarize_counts() -> None:
         "ignored": 1,
     }
     assert summarize([P, Status.TIMEOUT]) == {"passed": 1, "failed": 0, "ignored": 0}
+
+
+# Recorded with cargo test on rust 1.39.0 (a crate written for this test): rustdoc of
+# that era names a doctest of the crate's own docs with two spaces, since its item is
+# empty. 1.73 prints one (``src/lib.rs - (line 3)``).
+OLD_RUSTDOC = """\
+   Doc-tests tempdemo
+
+running 3 tests
+test src/lib.rs -  (line 3) ... ok
+test src/lib.rs - one (line 9) ... ok
+test src/lib.rs - Wrapper<T>::get (line 20) ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+
+
+def test_crate_doctests_of_old_rustdoc_keep_their_stable_name() -> None:
+    run = parse_libtest(OLD_RUSTDOC)
+    assert run.by_name() == {
+        "src/lib.rs - (crate)": P,
+        "src/lib.rs - Wrapper<T>::get": P,
+        "src/lib.rs - one": P,
+    }
+    raw = {r.name: r.raw for r in run.results}
+    assert raw["src/lib.rs - (crate)"] == "src/lib.rs -  (line 3)"
+    assert doctest_item("src/lib.rs -  (line 3)") == "src/lib.rs"
+    # The same doctest on newer rustdoc has the same stable name.
+    newer = parse_libtest(OLD_RUSTDOC.replace(" -  (line", " - (line"))
+    assert newer.by_name() == run.by_name()
+    failed = parse_libtest(OLD_RUSTDOC.replace("(line 3) ... ok", "(line 3) ... FAILED"))
+    assert failed.by_name()["src/lib.rs - (crate)"] == F
