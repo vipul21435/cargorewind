@@ -223,7 +223,8 @@ table.
   `unknown` target as the last resort. A test's id is its name, qualified as
   `name [test it]` only when two targets have a test of that name, so the strsim-rs
   task keeps the plain names. `task.json` lists every test with its target, its
-  status in each run and the command that reruns it.
+  status in each run and the command that reruns it, shell-quoted, so a doctest
+  filter such as `Parser<'a>::new` is one argument when the line is pasted into `sh`.
 - **Reruns by exact name and flaky detection.** Every FAIL_TO_PASS and PASS_TO_PASS
   candidate is rerun with `cargo test --lib|--test <name>|--bin <name> -- --exact
   <test>` three times (`--reruns`, 0 turns it off) in the stages that decided it:

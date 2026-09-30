@@ -6,8 +6,10 @@ import re
 import shlex
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -18,12 +20,14 @@ from cargorewind.bundle import read_task
 from cargorewind.crateindex import DirectoryIndex
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
 from cargorewind.dockerfile import PROBE_MARKER
+from cargorewind.flip import compute_flip, stage_tests
 from cargorewind.gitops import GitError
 from cargorewind.libtest import Status, parse_libtest
 from cargorewind.probes import HostCheck, ProbeReport
 from cargorewind.registry import HttpResponse, ImageResolver, RegistryClient
-from cargorewind.rewind import ProbeError, RewindOptions, rewind
+from cargorewind.rewind import ProbeError, RewindOptions, StageRun, rewind
 from cargorewind.runner import SubprocessRunner
+from cargorewind.testtargets import TargetMap, rerun_command
 from cargorewind.toolchain import IMAGE_DIGESTS, ToolchainError
 from tests.conftest import GitRepo
 from tests.test_buildcache import FakeDocker
@@ -823,3 +827,46 @@ def test_rewind_refuses_to_vendor_with_a_cargo_that_has_no_vendor(
     with pytest.raises(ToolchainError, match=r"--vendor needs cargo 1\.37\.0\+"):
         rewind(options, SubprocessRunner(), ScriptedBackend({}), lambda _: None)
     assert base
+
+
+@dataclass
+class _TableState:
+    """The part of an ``Execution`` that ``tests_table`` reads."""
+
+    runs: dict[str, StageRun]
+    recipe: Any
+
+
+def test_the_rerun_command_of_every_test_row_is_shell_quoted(tmp_path: Path) -> None:
+    # rustdoc prints item paths with generics and lifetimes; the item path is the filter.
+    output = (
+        "   Doc-tests x\n\nrunning 3 tests\n"
+        "test src/lib.rs - Parser<'a>::new (line 3) ... ok\n"
+        "test src/lib.rs - Wrapper<T>::get (line 9) ... ok\n"
+        "test src/lib.rs - Out>file (line 20) ... ok\n"
+    )
+    runs = {
+        stage: StageRun(stage, run, stage_tests(stage, run, TargetMap()))
+        for stage, run in (("base", RunResult(0, output)), ("before", RunResult(0, output)))
+    }
+    runs["after"] = StageRun("after", RunResult(0, output), runs["before"].tests)
+    flip = compute_flip(*(runs[s].tests for s in ("base", "before", "after")))
+    state = _TableState(runs, SimpleNamespace(test_command=("cargo", "test", "--no-fail-fast")))
+    table = rewind_module.tests_table(cast(Any, state), flip)
+    commands = {test_id: row.command for test_id, row in table.items()}
+    assert commands["src/lib.rs - Parser<'a>::new"] == "cargo test --doc -- 'Parser<'\"'\"'a>::new'"
+    for test_id, command in commands.items():
+        key = flip.keys[test_id]
+        raw = runs["after"].tests.results[key].raw
+        argv = rerun_command(key[0], raw, ("cargo", "test", "--no-fail-fast"))
+        assert shlex.split(command) == list(argv)
+        # A shell reads the same words back, with no redirection or open quote.
+        echoed = subprocess.run(
+            ["sh", "-c", 'printf "%s\\n" ' + command.removeprefix("cargo ")],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=tmp_path,
+        )
+        assert echoed.stdout.splitlines() == list(argv[1:])
+    assert list(tmp_path.iterdir()) == []  # nothing was redirected into a file

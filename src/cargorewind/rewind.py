@@ -4,6 +4,7 @@ runs, reruns by exact name, bundle."""
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -172,8 +173,9 @@ def rerun_section(state: Execution) -> RerunSection:
 
 
 def tests_table(state: Execution, flip: Flip) -> dict[str, TestRow]:
-    """Every test seen in any run: its target, the command that reruns it, its status
-    per stage and the rerun outcomes."""
+    """Every test seen in any run: its target, the command that reruns it (shell-quoted,
+    since doctest filters can hold ``<``, ``>`` or ``'``), its status per stage and the
+    rerun outcomes."""
     table: dict[str, TestRow] = {}
     for test_id, key in sorted(flip.keys.items()):
         target, name = key
@@ -184,7 +186,7 @@ def tests_table(state: Execution, flip: Flip) -> dict[str, TestRow]:
         table[test_id] = TestRow(
             target.label,
             name,
-            " ".join(rerun_command(target, raw, state.recipe.test_command)),
+            shlex.join(rerun_command(target, raw, state.recipe.test_command)),
             {stage: run.tests.status(key).value for stage, run in state.runs.items()},
             {
                 stage: [s.value for s in seen]
