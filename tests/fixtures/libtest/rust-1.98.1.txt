@@ -1,0 +1,360 @@
+=== text
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-2128ff8bf348a9d4)
+
+running 10 tests
+test tests::ignored_plain ... ignored
+test tests::ignored_with_reason ... ignored, needs a network
+test shared_name ... ok
+test tests::fails ... FAILED
+test tests::passes ... ok
+test tests::result_err ... FAILED
+test tests::panics_as_expected - should panic ... ok
+test tests::noisy ... ok
+test tests::should_panic_but_does_not - should panic ... FAILED
+test tests::thread_panics ... ok
+
+failures:
+
+---- tests::fails stdout ----
+
+thread 'tests::fails' (216) panicked at src/lib.rs:55:9:
+assertion `left == right` failed: wrong sum
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::result_err stdout ----
+Error: "an error value"
+
+---- tests::should_panic_but_does_not stdout ----
+note: test did not panic as expected at src/lib.rs:74:8
+
+failures:
+    tests::fails
+    tests::result_err
+    tests::should_panic_but_does_not
+
+test result: FAILED. 5 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-87d122276d6d7332)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-f56128decd49046f)
+
+running 3 tests
+test it_fails ... FAILED
+test shared_name ... ok
+test it_passes ... ok
+
+failures:
+
+---- it_fails stdout ----
+
+thread 'it_fails' (227) panicked at tests/it.rs:11:5:
+integration failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    it_fails
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-fa5e5b67960f89b8)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Doc-tests libtest_zoo
+
+running 6 tests
+test src/lib.rs - boom (line 28) ... ignored
+test src/lib.rs - boom (line 24) - compile ... ok
+test src/lib.rs - add (line 7) ... ok
+test src/lib.rs - boom (line 16) ... ok
+test src/lib.rs - boom (line 20) - compile fail ... ok
+test src/lib.rs - boom (line 32) ... FAILED
+
+failures:
+
+---- src/lib.rs - boom (line 32) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (280) panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/lib.rs - boom (line 32)
+
+test result: FAILED. 4 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== nocapture
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-2128ff8bf348a9d4)
+
+running 10 tests
+test shared_name ... ok
+test tests::fails ... 
+thread 'tests::fails' (294) panicked at src/lib.rs:55:9:
+assertion `left == right` failed: wrong sum
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test tests::ignored_plain ... ignored
+test tests::ignored_with_reason ... ignored, needs a network
+test tests::noisy ... hello from noisy
+noisy writes to stderr too
+ok
+test tests::panics_as_expected - should panic ... 
+thread 'tests::panics_as_expected' (296) panicked at src/lib.rs:36:5:
+boom
+ok
+test tests::passes ... ok
+test tests::result_err ... Error: "an error value"
+FAILED
+test tests::should_panic_but_does_not - should panic ... FAILED
+test tests::thread_panics ... 
+thread '<unnamed>' (301) panicked at src/lib.rs:84:44:
+inner thread panic
+ok
+
+failures:
+
+---- tests::should_panic_but_does_not stdout ----
+note: test did not panic as expected at src/lib.rs:74:8
+
+failures:
+    tests::fails
+    tests::result_err
+    tests::should_panic_but_does_not
+
+test result: FAILED. 5 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-87d122276d6d7332)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-f56128decd49046f)
+
+running 3 tests
+test it_fails ... 
+thread 'it_fails' (305) panicked at tests/it.rs:11:5:
+integration failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test it_passes ... ok
+test shared_name ... ok
+
+failures:
+
+failures:
+    it_fails
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-fa5e5b67960f89b8)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests libtest_zoo
+
+running 6 tests
+test src/lib.rs - add (line 7) ... ok
+test src/lib.rs - boom (line 16) ... ok
+test src/lib.rs - boom (line 20) - compile fail ... error[E0308]: mismatched types
+  --> src/lib.rs:21:14
+   |
+21 | let x: i32 = "not a number";
+   |        ---   ^^^^^^^^^^^^^^ expected `i32`, found `&str`
+   |        |
+   |        expected due to this
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0308`.
+ok
+test src/lib.rs - boom (line 24) - compile ... ok
+test src/lib.rs - boom (line 28) ... ignored
+test src/lib.rs - boom (line 32) ... Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (358) panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+FAILED
+
+failures:
+
+failures:
+    src/lib.rs - boom (line 32)
+
+test result: FAILED. 4 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== json
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-2128ff8bf348a9d4)
+{ "type": "suite", "event": "started", "test_count": 10 }
+{ "type": "test", "event": "started", "name": "shared_name" }
+{ "type": "test", "event": "started", "name": "tests::fails" }
+{ "type": "test", "event": "started", "name": "tests::ignored_plain" }
+{ "type": "test", "event": "started", "name": "tests::ignored_with_reason" }
+{ "type": "test", "event": "started", "name": "tests::noisy" }
+{ "type": "test", "event": "started", "name": "tests::panics_as_expected" }
+{ "type": "test", "event": "started", "name": "tests::passes" }
+{ "type": "test", "event": "started", "name": "tests::result_err" }
+{ "type": "test", "name": "shared_name", "event": "ok" }
+{ "type": "test", "event": "started", "name": "tests::should_panic_but_does_not" }
+{ "type": "test", "name": "tests::ignored_plain", "event": "ignored" }
+{ "type": "test", "event": "started", "name": "tests::thread_panics" }
+{ "type": "test", "name": "tests::ignored_with_reason", "event": "ignored", "message": "needs a network" }
+{ "type": "test", "name": "tests::noisy", "event": "ok" }
+{ "type": "test", "name": "tests::fails", "event": "failed", "stdout": "\nthread 'tests::fails' (372) panicked at src/lib.rs:55:9:\nassertion `left == right` failed: wrong sum\n  left: 3\n right: 4\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "tests::panics_as_expected", "event": "ok" }
+{ "type": "test", "name": "tests::passes", "event": "ok" }
+{ "type": "test", "name": "tests::result_err", "event": "failed", "stdout": "Error: \"an error value\"\n" }
+{ "type": "test", "name": "tests::should_panic_but_does_not", "event": "failed", "message": "test did not panic as expected at src/lib.rs:74:8" }
+{ "type": "test", "name": "tests::thread_panics", "event": "ok" }
+{ "type": "suite", "event": "failed", "passed": 5, "failed": 3, "ignored": 2, "measured": 0, "filtered_out": 0, "exec_time": 0.000580083 }
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-87d122276d6d7332)
+{ "type": "suite", "event": "started", "test_count": 1 }
+{ "type": "test", "event": "started", "name": "bin_test" }
+{ "type": "test", "name": "bin_test", "event": "ok" }
+{ "type": "suite", "event": "ok", "passed": 1, "failed": 0, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.000114417 }
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-f56128decd49046f)
+{ "type": "suite", "event": "started", "test_count": 3 }
+{ "type": "test", "event": "started", "name": "it_fails" }
+{ "type": "test", "event": "started", "name": "it_passes" }
+{ "type": "test", "event": "started", "name": "shared_name" }
+{ "type": "test", "name": "it_fails", "event": "failed", "stdout": "\nthread 'it_fails' (383) panicked at tests/it.rs:11:5:\nintegration failure\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "it_passes", "event": "ok" }
+{ "type": "test", "name": "shared_name", "event": "ok" }
+{ "type": "suite", "event": "failed", "passed": 2, "failed": 1, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.000272833 }
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-fa5e5b67960f89b8)
+{ "type": "suite", "event": "started", "test_count": 1 }
+{ "type": "test", "event": "started", "name": "slow_but_fine" }
+{ "type": "test", "name": "slow_but_fine", "event": "ok" }
+{ "type": "suite", "event": "ok", "passed": 1, "failed": 0, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.056851791 }
+   Doc-tests libtest_zoo
+{ "type": "suite", "event": "started", "test_count": 6 }
+{ "type": "test", "event": "started", "name": "src/lib.rs - add (line 7)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 16)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 20)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 24)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 28)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 32)" }
+{ "type": "test", "name": "src/lib.rs - boom (line 28)", "event": "ignored" }
+{ "type": "test", "name": "src/lib.rs - boom (line 24)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - boom (line 20)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - add (line 7)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - boom (line 32)", "event": "failed", "stdout": "Test executable failed (exit status: 101).\n\nstderr:\n\nthread 'main' (434) panicked at src/lib.rs:5:1:\nassertion `left == right` failed\n  left: 2\n right: 3\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n" }
+{ "type": "test", "name": "src/lib.rs - boom (line 16)", "event": "ok" }
+{ "type": "suite", "event": "failed", "passed": 4, "failed": 1, "ignored": 1, "measured": 0, "filtered_out": 0, "exec_time": 0.122910791 }
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== exact-lib
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-2128ff8bf348a9d4)
+
+running 1 test
+test tests::passes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-test
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-fa5e5b67960f89b8)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+=== exit 0
+=== exact-bin
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-87d122276d6d7332)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-doc
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+   Doc-tests libtest_zoo
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-missing
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-2128ff8bf348a9d4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+=== exit 0
+=== compile-error
+   Compiling libtest-zoo v0.1.0 (/tmp/zoo)
+error[E0425]: cannot find function `missing_fn` in this scope
+  --> src/lib.rs:50:31
+   |
+50 |         assert_eq!(add(1, 2), missing_fn());
+   |                               ^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `libtest-zoo` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+=== exit 101

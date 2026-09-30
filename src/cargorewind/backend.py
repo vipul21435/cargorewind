@@ -111,6 +111,8 @@ class Backend(Protocol):
 
     def open_session(self, tag: str) -> Session: ...
 
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult: ...
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
@@ -131,10 +133,13 @@ def probe_step(probes: tuple[str, ...]) -> str:
 
 
 def container_script(
-    overlay: Overlay, command: tuple[str, ...] = TEST_COMMAND, probes: tuple[str, ...] = ()
+    overlay: Overlay,
+    command: tuple[str, ...] = TEST_COMMAND,
+    probes: tuple[str, ...] = (),
+    script: str | None = None,
 ) -> str:
     """Shell script run in the container: unpack the overlay, check that the probe
-    identifiers are there, then run the tests."""
+    identifiers are there, then run the tests (or ``script``, e.g. the reruns)."""
     steps = [f"cd {REPO_DIR}"]
     if overlay.files:
         steps.append("tar -xmf -")  # -m: fresh mtimes, so cargo rebuilds changed files
@@ -142,7 +147,10 @@ def container_script(
         steps.append("rm -f -- " + " ".join(shlex.quote(p) for p in overlay.deleted))
     if probes:
         steps.append(probe_step(probes))
-    steps.append("exec " + " ".join(command) + " 2>&1")
+    if script is not None:
+        steps.append("exec sh -c " + shlex.quote(script) + " 2>&1")
+    else:
+        steps.append("exec " + " ".join(command) + " 2>&1")
     return " && ".join(steps)
 
 
@@ -198,7 +206,14 @@ class DockerBackend:
         command: tuple[str, ...] = TEST_COMMAND,
         probes: tuple[str, ...] = (),
     ) -> RunResult:
-        name = f"cargorewind-{stage}-{os.getpid()}"
+        return self._run(tag, stage, overlay, container_script(overlay, command, probes))
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        """Run a shell script in a fresh container of the stage (the reruns)."""
+        return self._run(tag, run, overlay, container_script(overlay, script=script))
+
+    def _run(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        name = f"cargorewind-{run}-{os.getpid()}"
         argv = [
             "docker",
             "run",
@@ -215,7 +230,7 @@ class DockerBackend:
             tag,
             "sh",
             "-c",
-            container_script(overlay, command, probes),
+            script,
         ]
         stdin = overlay.to_tar() if overlay.files else None
         result = self.runner.run(argv, stdin=stdin, timeout=self.timeout)
@@ -288,9 +303,16 @@ class RecordingBackend:
         probes: tuple[str, ...] = (),
     ) -> RunResult:
         result = self.inner.run_tests(tag, stage, overlay, command, probes)
-        self.data["runs"][stage] = {
+        return self._record(stage, overlay, container_script(overlay, command, probes), result)
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        result = self.inner.run_script(tag, run, overlay, script)
+        return self._record(run, overlay, container_script(overlay, script=script), result)
+
+    def _record(self, run: str, overlay: Overlay, script: str, result: RunResult) -> RunResult:
+        self.data["runs"][run] = {
             "overlay_sha256": overlay.digest(),
-            "script_sha256": sha256_text(container_script(overlay, command, probes)),
+            "script_sha256": sha256_text(script),
             **asdict(result),
         }
         self.save()
@@ -349,14 +371,20 @@ class ReplayBackend:
         command: tuple[str, ...] = TEST_COMMAND,
         probes: tuple[str, ...] = (),
     ) -> RunResult:
-        recorded = self.data["runs"].get(stage)
+        return self._replay(stage, overlay, container_script(overlay, command, probes))
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        return self._replay(run, overlay, container_script(overlay, script=script))
+
+    def _replay(self, run: str, overlay: Overlay, script: str) -> RunResult:
+        recorded = self.data["runs"].get(run)
         if recorded is None:
-            raise ReplayError(f"{self.path}: no recorded run for stage {stage!r}")
+            raise ReplayError(f"{self.path}: no recorded run for stage {run!r}")
         if recorded["overlay_sha256"] != overlay.digest():
-            raise ReplayError(f"files for stage {stage!r} differ from the recorded run")
-        script = sha256_text(container_script(overlay, command, probes))
-        if recorded.get("script_sha256", script) != script:
-            raise ReplayError(f"the script of stage {stage!r} differs from the recorded run")
+            raise ReplayError(f"files for stage {run!r} differ from the recorded run")
+        digest = sha256_text(script)
+        if recorded.get("script_sha256", digest) != digest:
+            raise ReplayError(f"the script of stage {run!r} differs from the recorded run")
         return RunResult(
             int(recorded["exit_code"]), str(recorded["output"]), bool(recorded["timed_out"])
         )

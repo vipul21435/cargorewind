@@ -34,7 +34,14 @@ from cargorewind.lockstage import (
 )
 from cargorewind.patchsplit import PatchError
 from cargorewind.registry import default_cache_dir, make_resolver
-from cargorewind.rewind import ProbeError, RewindOptions, RewindReport, rewind
+from cargorewind.rewind import (
+    DEFAULT_RERUNS,
+    DEFAULT_TEST_TIMEOUT,
+    ProbeError,
+    RewindOptions,
+    RewindReport,
+    rewind,
+)
 from cargorewind.runner import CommandError, SubprocessRunner
 from cargorewind.splitreport import resolve_commits, split_commit
 from cargorewind.toolchain import ToolchainError
@@ -152,6 +159,11 @@ def _print_summary(report: RewindReport, out: Path) -> None:
         typer.echo(f"regressions   {len(flip.regressions)}: {', '.join(flip.regressions)}")
     if flip.still_failing:
         typer.echo(f"still failing {len(flip.still_failing)}: {', '.join(flip.still_failing)}")
+    if report.reruns:
+        rerun = ", ".join(f"{len(r.items)} in {s}" for s, r in report.reruns.items())
+        typer.echo(f"reruns        {report.rerun_rounds} x by exact name ({rerun})")
+    if flip.flaky:
+        typer.echo(f"flaky         {len(flip.flaky)}: {', '.join(f.id for f in flip.flaky)}")
     probes = report.probes
     if probes.words:
         state = "passed" if probes.ok else "FAILED"
@@ -291,6 +303,21 @@ def rewind_command(
             help="Ignore a cached image and build with docker build --no-cache.",
         ),
     ] = False,
+    reruns: Annotated[
+        int,
+        typer.Option(
+            "--reruns",
+            min=0,
+            help=(
+                "Rerun every FAIL_TO_PASS and PASS_TO_PASS candidate by exact name this many "
+                "times per stage; a test whose outcome changes is flaky and leaves both lists."
+            ),
+        ),
+    ] = DEFAULT_RERUNS,
+    test_timeout: Annotated[
+        int,
+        typer.Option("--test-timeout", min=1, help="Seconds allowed per rerun command."),
+    ] = DEFAULT_TEST_TIMEOUT,
 ) -> None:
     """Rebuild SOURCE at the fix's base commit and verify the fail-to-pass flip."""
     if image is not None and "@sha256:" not in image:
@@ -312,6 +339,8 @@ def rewind_command(
         cache_dir=cache_dir,
         cache=cache,
         rebuild=rebuild,
+        reruns=reruns,
+        test_timeout=test_timeout,
     )
     try:
         report = rewind(options, SubprocessRunner(), backend, typer.echo)

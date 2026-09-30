@@ -1,5 +1,5 @@
 """The end-to-end rewind: checkout, split, toolchain, probes, recipe, cached build, three
-runs, bundle."""
+runs, reruns by exact name, bundle."""
 
 from __future__ import annotations
 
@@ -13,9 +13,31 @@ from cargorewind import __version__
 from cargorewind.backend import Backend, BuildResult, Overlay, RunResult
 from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.crateindex import CrateIndex
-from cargorewind.dockerfile import PROBE_GLOB, LockStrategy, Recipe, render_dockerfile
+from cargorewind.dockerfile import (
+    PROBE_EXIT_CODE,
+    PROBE_GLOB,
+    PROBE_MARKER,
+    LockStrategy,
+    Recipe,
+    render_dockerfile,
+)
+from cargorewind.flip import (
+    STAGES,
+    Flip,
+    Rerun,
+    StageState,
+    StageTests,
+    TestKey,
+    apply_reruns,
+    compute_flip,
+    parse_reruns,
+    rerun_plan,
+    rerun_script,
+    stage_tests,
+)
 from cargorewind.gitops import Git, GitError, GitTree, open_checkout
-from cargorewind.libtest import Flip, Outcome, compute_flip, parse_libtest, summarize
+from cargorewind.layout import Layout
+from cargorewind.libtest import Status
 from cargorewind.lockstage import (
     LockPlan,
     build_context,
@@ -33,11 +55,13 @@ from cargorewind.probes import ProbeReport, plan_probes
 from cargorewind.registry import ImageChoice, ImageResolver
 from cargorewind.runner import Runner
 from cargorewind.splitreport import Commits, require, resolve_commits, split_commit, touched
+from cargorewind.testtargets import TargetMap, rerun_command
 from cargorewind.toolchain import TOOLCHAIN_FILES, Decision, Toolchain
 from cargorewind.toolchainreport import choose_image, infer_toolchain, toolchain_document
 
 TASK_SCHEMA = 1
-STAGES = ("base", "before", "after")
+DEFAULT_RERUNS = 3
+DEFAULT_TEST_TIMEOUT = 300  # seconds per rerun command
 
 Log = Callable[[str], None]
 
@@ -56,6 +80,8 @@ class RewindOptions:
     cache_dir: Path | None = None  # index cache (default: $CARGOREWIND_CACHE_DIR, ~/.cache)
     cache: BuildCache | None = None  # None: always build (Docker's layer cache still applies)
     rebuild: bool = False  # skip the cache lookup and build with --no-cache
+    reruns: int = DEFAULT_RERUNS  # reruns by exact name per candidate test (0: none)
+    test_timeout: int = DEFAULT_TEST_TIMEOUT  # seconds allowed per rerun command
 
 
 class ProbeError(RuntimeError):
@@ -74,7 +100,15 @@ class BuildOutcome:
 class StageRun:
     stage: str
     result: RunResult
-    outcomes: dict[str, Outcome]
+    tests: StageTests
+
+
+@dataclass
+class RerunRun:
+    stage: str
+    result: RunResult
+    items: list[Rerun]
+    changed: int  # tests whose outcome differed from the stage run in some round
 
 
 @dataclass
@@ -91,6 +125,9 @@ class RewindReport:
     build: BuildOutcome
     probes: ProbeReport
     runs: dict[str, StageRun] = field(default_factory=dict)
+    reruns: dict[str, RerunRun] = field(default_factory=dict)
+    rerun_rounds: int = 0
+    test_timeout: int = DEFAULT_TEST_TIMEOUT
     flip: Flip | None = None
 
     @property
@@ -152,16 +189,56 @@ class RewindReport:
                 name: {
                     "exit_code": run.result.exit_code,
                     "timed_out": run.result.timed_out,
-                    **summarize(run.outcomes),
+                    "state": run.tests.state,
+                    **run.tests.counts(),
                 }
                 for name, run in self.runs.items()
             },
+            "reruns": {
+                "rounds": self.rerun_rounds,
+                "test_timeout": self.test_timeout,
+                "stages": {
+                    name: {
+                        "tests": len(run.items),
+                        "exit_code": run.result.exit_code,
+                        "timed_out": run.result.timed_out,
+                        "changed": run.changed,
+                        "log": f"logs/rerun-{name}.log",
+                    }
+                    for name, run in self.reruns.items()
+                },
+            },
+            "tests": self.tests_table(),
             "FAIL_TO_PASS": self.flip.fail_to_pass,
             "PASS_TO_PASS": self.flip.pass_to_pass,
             "regressions": self.flip.regressions,
             "still_failing": self.flip.still_failing,
+            "flaky": [{"id": f.id, "reason": f.reason} for f in self.flip.flaky],
             "verified": self.verified,
         }
+
+    def tests_table(self) -> dict[str, dict[str, Any]]:
+        """Every test seen in any run: its target, the command that reruns it, its
+        status per stage and the rerun outcomes."""
+        assert self.flip is not None
+        table: dict[str, dict[str, Any]] = {}
+        for test_id, key in sorted(self.flip.keys.items()):
+            target, name = key
+            raw = next(
+                (r.tests.results[key].raw for r in self.runs.values() if key in r.tests.results),
+                name,
+            )
+            table[test_id] = {
+                "target": target.label,
+                "name": name,
+                "command": " ".join(rerun_command(target, raw, self.recipe.test_command)),
+                **{stage: run.tests.status(key).value for stage, run in self.runs.items()},
+                "reruns": {
+                    stage: [s.value for s in seen]
+                    for stage, seen in self.flip.reruns.get(test_id, {}).items()
+                },
+            }
+        return table
 
 
 def pin_patched_toolchain(toolchain: Toolchain, patched: tuple[str, ...]) -> Toolchain:
@@ -255,26 +332,78 @@ def _environment(
     return toolchain, plan, choice, patched
 
 
-def _run_stages(
-    report: RewindReport, backend: Backend, overlays: dict[str, Overlay], logs: Path, log: Log
-) -> None:
+@dataclass(frozen=True)
+class _Runtime:
+    """What the stage runs and the reruns share."""
+
+    backend: Backend
+    overlays: dict[str, Overlay]
+    targets: TargetMap
+    logs: Path
+    log: Log
+
+
+def _run_stages(report: RewindReport, rt: _Runtime) -> None:
     probes = report.probes
     for stage in STAGES:
         required = probes.required(stage)
         command = report.recipe.test_command
-        result = backend.run_tests(report.build.tag, stage, overlays[stage], command, required)
+        result = rt.backend.run_tests(
+            report.build.tag, stage, rt.overlays[stage], command, required
+        )
         probes.record_stage(stage, result.output)
-        (logs / f"{stage}.log").write_text(result.output)
-        outcomes = parse_libtest(result.output)
-        report.runs[stage] = StageRun(stage, result, outcomes)
-        counts = summarize(outcomes)
-        log(
+        (rt.logs / f"{stage}.log").write_text(result.output)
+        probe_failed = result.exit_code == PROBE_EXIT_CODE and PROBE_MARKER in result.output
+        tests = stage_tests(stage, result, rt.targets, probe_failed=probe_failed)
+        report.runs[stage] = StageRun(stage, result, tests)
+        counts = tests.counts()
+        state = "" if tests.state == StageState.RAN else f"  ({tests.state})"
+        rt.log(
             f"run       {stage:<6} exit {result.exit_code:>3}  "
-            f"{counts['passed']} passed, {counts['failed']} failed, {counts['ignored']} ignored"
+            f"{counts['passed']} passed, {counts['failed']} failed, "
+            f"{counts['ignored']} ignored{state}"
         )
     if probes.words:
         checked = ", ".join(f"{stage} {status}" for stage, status in probes.container.items())
-        log(f"probe     in Docker: {checked}")
+        rt.log(f"probe     in Docker: {checked}")
+
+
+def _rerun(report: RewindReport, rt: _Runtime, flip: Flip, options: RewindOptions) -> Flip:
+    """Rerun every FAIL_TO_PASS and PASS_TO_PASS candidate by exact name, N times per
+    stage, and take the tests whose outcome changes out of the lists."""
+    stages = {name: run.tests for name, run in report.runs.items()}
+    plan = rerun_plan(flip, stages, report.recipe.test_command)
+    report.rerun_rounds = options.reruns
+    report.test_timeout = options.test_timeout
+    seen: dict[str, dict[TestKey, list[Status]]] = {}
+    for stage, items in plan.items():
+        script = rerun_script(items, options.reruns, options.test_timeout)
+        run = f"rerun-{stage}"
+        result = rt.backend.run_script(report.build.tag, run, rt.overlays[stage], script)
+        (rt.logs / f"{run}.log").write_text(result.output)
+        statuses = parse_reruns(
+            result.output, items, options.reruns, rt.targets, timed_out=result.timed_out
+        )
+        seen[stage] = statuses
+        changed = sum(
+            1 for item in items if set(statuses[item.key]) != {stages[stage].status(item.key)}
+        )
+        report.reruns[stage] = RerunRun(stage, result, items, changed)
+        rt.log(
+            f"rerun     {stage:<6} exit {result.exit_code:>3}  {options.reruns} x "
+            f"{len(items)} test(s) by exact name, {changed} changed outcome"
+        )
+    final = apply_reruns(flip, stages, seen)
+    for flaky in final.flaky:
+        rt.log(f"flaky     {flaky.id}: {flaky.reason}")
+    return final
+
+
+def _targets(git: Git, base: str, split: SplitResult) -> TargetMap:
+    """cargo targets of the fix commit (the split's layout) and of the base commit."""
+    base_layout = Layout(GitTree(git, base), ())
+    packages = [*split.packages, *base_layout.packages]
+    return TargetMap(t for package in packages for t in package.targets)
 
 
 def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -> RewindReport:
@@ -332,8 +461,12 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         build,
         probes,
     )
-    _run_stages(report, backend, overlays, logs, log)
-    report.flip = compute_flip(*(report.runs[s].outcomes for s in STAGES))
+    rt = _Runtime(backend, overlays, _targets(git, base, split), logs, log)
+    _run_stages(report, rt)
+    flip = compute_flip(*(report.runs[s].tests for s in STAGES))
+    if options.reruns > 0 and (flip.fail_to_pass or flip.pass_to_pass):
+        flip = _rerun(report, rt, flip, options)
+    report.flip = flip
     _write_probes(out, options.source, base, fix, probes)
     (out / "task.json").write_text(json.dumps(report.task(), indent=2) + "\n")
     return report

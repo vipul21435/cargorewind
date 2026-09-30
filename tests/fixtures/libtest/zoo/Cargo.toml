@@ -1,0 +1,9 @@
+[package]
+name = "libtest-zoo"
+version = "0.1.0"
+authors = ["Vipul Raj Jha"]
+edition = "2018"
+license = "MIT"
+publish = false
+
+[workspace]

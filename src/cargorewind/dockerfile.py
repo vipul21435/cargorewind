@@ -32,6 +32,8 @@ TARGET_DIR = f"{HOME_DIR}/target"
 VENDOR_DIR = f"{HOME_DIR}/vendor"
 TOOLCHAIN_STAGE = "toolchain"
 TEST_COMMAND: tuple[str, ...] = ("cargo", "test", "--no-fail-fast")
+# libtest's JSON output, unstable: only nightly toolchains accept it.
+JSON_FORMAT_ARGS: tuple[str, ...] = ("--", "-Z", "unstable-options", "--format", "json")
 WARM_COMMAND: tuple[str, ...] = ("cargo", "test", "--no-run")
 PROBE_GLOB = "*.rs"
 PROBE_EXIT_CODE = 97  # a stage whose checkout lacks a probe identifier exits with this
@@ -59,9 +61,11 @@ class RecipeError(ValueError):
     """A recipe field that must not reach a Dockerfile line."""
 
 
-def stage_test_command(vendor: bool) -> tuple[str, ...]:
-    """The test command of every stage run; vendored environments add ``--offline``."""
-    return (*TEST_COMMAND, "--offline") if vendor else TEST_COMMAND
+def stage_test_command(vendor: bool, json_format: bool = False) -> tuple[str, ...]:
+    """The test command of every stage run; vendored environments add ``--offline``, and
+    nightly toolchains ask libtest for its JSON format."""
+    command = (*TEST_COMMAND, "--offline") if vendor else TEST_COMMAND
+    return (*command, *JSON_FORMAT_ARGS) if json_format else command
 
 
 def _check(field_name: str, value: str, pattern: re.Pattern[str]) -> None:

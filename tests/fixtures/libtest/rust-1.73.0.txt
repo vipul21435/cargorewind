@@ -1,0 +1,478 @@
+=== text
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-f12aa2eeabfcb19e)
+
+running 10 tests
+test tests::ignored_plain ... ignored
+test tests::ignored_with_reason ... ignored, needs a network
+test shared_name ... ok
+test tests::noisy ... ok
+test tests::fails ... FAILED
+test tests::panics_as_expected - should panic ... ok
+test tests::passes ... ok
+test tests::result_err ... FAILED
+test tests::should_panic_but_does_not - should panic ... FAILED
+test tests::thread_panics ... ok
+
+failures:
+
+---- tests::fails stdout ----
+thread 'tests::fails' panicked at src/lib.rs:55:9:
+assertion `left == right` failed: wrong sum
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::result_err stdout ----
+Error: "an error value"
+
+---- tests::should_panic_but_does_not stdout ----
+note: test did not panic as expected
+
+failures:
+    tests::fails
+    tests::result_err
+    tests::should_panic_but_does_not
+
+test result: FAILED. 5 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-9000e6bde854bbdb)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-2fe4c8fe2e80b521)
+
+running 3 tests
+test it_fails ... FAILED
+test it_passes ... ok
+test shared_name ... ok
+
+failures:
+
+---- it_fails stdout ----
+thread 'it_fails' panicked at tests/it.rs:11:5:
+integration failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    it_fails
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-1500c3abaf4ad2db)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Doc-tests libtest-zoo
+
+running 6 tests
+test src/lib.rs - boom (line 28) ... ignored
+test src/lib.rs - boom (line 24) - compile ... ok
+test src/lib.rs - boom (line 20) - compile fail ... ok
+test src/lib.rs - boom (line 16) ... ok
+test src/lib.rs - add (line 7) ... ok
+test src/lib.rs - boom (line 32) ... FAILED
+
+failures:
+
+---- src/lib.rs - boom (line 32) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+thread 'main' panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+stack backtrace:
+   0:     0xaaaac4ceeb30 - std::backtrace_rs::backtrace::libunwind::trace::heaab0e590535aeb3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1:     0xaaaac4ceeb30 - std::backtrace_rs::backtrace::trace_unsynchronized::h89cc7ae9ebb707d7
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2:     0xaaaac4ceeb30 - std::sys_common::backtrace::_print_fmt::h08c31be18fedf422
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:67:5
+   3:     0xaaaac4ceeb30 - <std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display>::fmt::hc38bcf44d9e857e3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:44:22
+   4:     0xaaaac4d0a890 - core::fmt::rt::Argument::fmt::ha5b752f9cd7ef4a3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/rt.rs:138:9
+   5:     0xaaaac4d0a890 - core::fmt::write::h9fac187ae7486f3c
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/mod.rs:1094:21
+   6:     0xaaaac4cec8f8 - std::io::Write::write_fmt::h239e9fb6296b3a7f
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/io/mod.rs:1714:15
+   7:     0xaaaac4cee964 - std::sys_common::backtrace::_print::h52f67cfa8753b0ab
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:47:5
+   8:     0xaaaac4cee964 - std::sys_common::backtrace::print::hdea7481e2c957a93
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:34:9
+   9:     0xaaaac4cefef0 - std::panicking::default_hook::{{closure}}::h7c36fa733369c49e
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:270:22
+  10:     0xaaaac4cefc18 - std::panicking::default_hook::h303eee75f9a8f6a8
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:290:9
+  11:     0xaaaac4cf04b4 - std::panicking::rust_panic_with_hook::h270c94381ec34744
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:707:13
+  12:     0xaaaac4cf037c - std::panicking::begin_panic_handler::{{closure}}::h3653e3502bcc1625
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:599:13
+  13:     0xaaaac4cef014 - std::sys_common::backtrace::__rust_end_short_backtrace::h6b8510f2f024eeeb
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:170:18
+  14:     0xaaaac4cf00cc - rust_begin_unwind
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:595:5
+  15:     0xaaaac4cd6554 - core::panicking::panic_fmt::ha96945d7a1b20293
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/panicking.rs:67:14
+  16:     0xaaaac4cd67a4 - core::panicking::assert_failed_inner::h87e57bc677944fed
+  17:     0xaaaac4cd6d30 - core::panicking::assert_failed::h70d0a73c4c5c3c92
+  18:     0xaaaac4cd6dd0 - rust_out::main::_doctest_main_src_lib_rs_32_0::hdb7718f1c1ed7468
+  19:     0xaaaac4cd6d44 - rust_out::main::hb10ac33b109b5210
+  20:     0xaaaac4cd6c9c - core::ops::function::FnOnce::call_once::h1c1a4fe0e7e8fd9f
+  21:     0xaaaac4cd6b5c - std::sys_common::backtrace::__rust_begin_short_backtrace::h10a8781de03c812f
+  22:     0xaaaac4cd6bbc - std::rt::lang_start::{{closure}}::h477801b7d081b792
+  23:     0xaaaac4ceab98 - core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once::h88e11b183391c045
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/ops/function.rs:284:13
+  24:     0xaaaac4ceab98 - std::panicking::try::do_call::hf62418fc1f7ab0ba
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40
+  25:     0xaaaac4ceab98 - std::panicking::try::h96e06e195e92b5b2
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19
+  26:     0xaaaac4ceab98 - std::panic::catch_unwind::h81d0af01faa937a6
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14
+  27:     0xaaaac4ceab98 - std::rt::lang_start_internal::{{closure}}::hf32b9834747c984e
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:48
+  28:     0xaaaac4ceab98 - std::panicking::try::do_call::had623a98a0d3cc26
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40
+  29:     0xaaaac4ceab98 - std::panicking::try::ha216a98a719bb195
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19
+  30:     0xaaaac4ceab98 - std::panic::catch_unwind::h47218f3906a674ae
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14
+  31:     0xaaaac4ceab98 - std::rt::lang_start_internal::h9020369f9618c61f
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:20
+  32:     0xaaaac4cd6b9c - std::rt::lang_start::hb596b9e8a1355df2
+  33:     0xaaaac4cd6df4 - main
+  34:     0xffffaade7780 - <unknown>
+  35:     0xffffaade7858 - __libc_start_main
+  36:     0xaaaac4cd6a70 - _start
+  37:                0x0 - <unknown>
+
+
+
+failures:
+    src/lib.rs - boom (line 32)
+
+test result: FAILED. 4 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== nocapture
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-f12aa2eeabfcb19e)
+
+running 10 tests
+test shared_name ... ok
+test tests::fails ... thread 'tests::fails' panicked at src/lib.rs:55:9:
+assertion `left == right` failed: wrong sum
+  left: 3
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test tests::ignored_plain ... ignored
+test tests::ignored_with_reason ... ignored, needs a network
+test tests::noisy ... hello from noisy
+noisy writes to stderr too
+ok
+test tests::panics_as_expected - should panic ... thread 'tests::panics_as_expected' panicked at src/lib.rs:36:5:
+boom
+ok
+test tests::passes ... ok
+test tests::result_err ... Error: "an error value"
+FAILED
+test tests::should_panic_but_does_not - should panic ... FAILED
+test tests::thread_panics ... thread '<unnamed>' panicked at src/lib.rs:84:44:
+inner thread panic
+ok
+
+failures:
+
+---- tests::should_panic_but_does_not stdout ----
+note: test did not panic as expected
+
+failures:
+    tests::fails
+    tests::result_err
+    tests::should_panic_but_does_not
+
+test result: FAILED. 5 passed; 3 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-9000e6bde854bbdb)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-2fe4c8fe2e80b521)
+
+running 3 tests
+test it_fails ... thread 'it_fails' panicked at tests/it.rs:11:5:
+integration failure
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test it_passes ... ok
+test shared_name ... ok
+
+failures:
+
+failures:
+    it_fails
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-1500c3abaf4ad2db)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Doc-tests libtest-zoo
+
+running 6 tests
+test src/lib.rs - add (line 7) ... ok
+test src/lib.rs - boom (line 16) ... ok
+test src/lib.rs - boom (line 20) - compile fail ... error[E0308]: mismatched types
+ --> src/lib.rs:21:14
+  |
+3 | let x: i32 = "not a number";
+  |        ---   ^^^^^^^^^^^^^^ expected `i32`, found `&str`
+  |        |
+  |        expected due to this
+
+error: aborting due to previous error
+
+For more information about this error, try `rustc --explain E0308`.
+ok
+test src/lib.rs - boom (line 24) - compile ... ok
+test src/lib.rs - boom (line 28) ... ignored
+test src/lib.rs - boom (line 32) ... Test executable failed (exit status: 101).
+
+stderr:
+thread 'main' panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+stack backtrace:
+   0:     0xaaaabe4beb30 - std::backtrace_rs::backtrace::libunwind::trace::heaab0e590535aeb3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5
+   1:     0xaaaabe4beb30 - std::backtrace_rs::backtrace::trace_unsynchronized::h89cc7ae9ebb707d7
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5
+   2:     0xaaaabe4beb30 - std::sys_common::backtrace::_print_fmt::h08c31be18fedf422
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:67:5
+   3:     0xaaaabe4beb30 - <std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display>::fmt::hc38bcf44d9e857e3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:44:22
+   4:     0xaaaabe4da890 - core::fmt::rt::Argument::fmt::ha5b752f9cd7ef4a3
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/rt.rs:138:9
+   5:     0xaaaabe4da890 - core::fmt::write::h9fac187ae7486f3c
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/mod.rs:1094:21
+   6:     0xaaaabe4bc8f8 - std::io::Write::write_fmt::h239e9fb6296b3a7f
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/io/mod.rs:1714:15
+   7:     0xaaaabe4be964 - std::sys_common::backtrace::_print::h52f67cfa8753b0ab
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:47:5
+   8:     0xaaaabe4be964 - std::sys_common::backtrace::print::hdea7481e2c957a93
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:34:9
+   9:     0xaaaabe4bfef0 - std::panicking::default_hook::{{closure}}::h7c36fa733369c49e
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:270:22
+  10:     0xaaaabe4bfc18 - std::panicking::default_hook::h303eee75f9a8f6a8
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:290:9
+  11:     0xaaaabe4c04b4 - std::panicking::rust_panic_with_hook::h270c94381ec34744
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:707:13
+  12:     0xaaaabe4c037c - std::panicking::begin_panic_handler::{{closure}}::h3653e3502bcc1625
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:599:13
+  13:     0xaaaabe4bf014 - std::sys_common::backtrace::__rust_end_short_backtrace::h6b8510f2f024eeeb
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:170:18
+  14:     0xaaaabe4c00cc - rust_begin_unwind
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:595:5
+  15:     0xaaaabe4a6554 - core::panicking::panic_fmt::ha96945d7a1b20293
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/panicking.rs:67:14
+  16:     0xaaaabe4a67a4 - core::panicking::assert_failed_inner::h87e57bc677944fed
+  17:     0xaaaabe4a6d30 - core::panicking::assert_failed::h70d0a73c4c5c3c92
+  18:     0xaaaabe4a6dd0 - rust_out::main::_doctest_main_src_lib_rs_32_0::hdb7718f1c1ed7468
+  19:     0xaaaabe4a6d44 - rust_out::main::hb10ac33b109b5210
+  20:     0xaaaabe4a6c9c - core::ops::function::FnOnce::call_once::h1c1a4fe0e7e8fd9f
+  21:     0xaaaabe4a6b5c - std::sys_common::backtrace::__rust_begin_short_backtrace::h10a8781de03c812f
+  22:     0xaaaabe4a6bbc - std::rt::lang_start::{{closure}}::h477801b7d081b792
+  23:     0xaaaabe4bab98 - core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once::h88e11b183391c045
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/ops/function.rs:284:13
+  24:     0xaaaabe4bab98 - std::panicking::try::do_call::hf62418fc1f7ab0ba
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40
+  25:     0xaaaabe4bab98 - std::panicking::try::h96e06e195e92b5b2
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19
+  26:     0xaaaabe4bab98 - std::panic::catch_unwind::h81d0af01faa937a6
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14
+  27:     0xaaaabe4bab98 - std::rt::lang_start_internal::{{closure}}::hf32b9834747c984e
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:48
+  28:     0xaaaabe4bab98 - std::panicking::try::do_call::had623a98a0d3cc26
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40
+  29:     0xaaaabe4bab98 - std::panicking::try::ha216a98a719bb195
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19
+  30:     0xaaaabe4bab98 - std::panic::catch_unwind::h47218f3906a674ae
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14
+  31:     0xaaaabe4bab98 - std::rt::lang_start_internal::h9020369f9618c61f
+                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:20
+  32:     0xaaaabe4a6b9c - std::rt::lang_start::hb596b9e8a1355df2
+  33:     0xaaaabe4a6df4 - main
+  34:     0xffffb5907780 - <unknown>
+  35:     0xffffb5907858 - __libc_start_main
+  36:     0xaaaabe4a6a70 - _start
+  37:                0x0 - <unknown>
+
+FAILED
+
+failures:
+
+failures:
+    src/lib.rs - boom (line 32)
+
+test result: FAILED. 4 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== json
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-f12aa2eeabfcb19e)
+{ "type": "suite", "event": "started", "test_count": 10 }
+{ "type": "test", "event": "started", "name": "shared_name" }
+{ "type": "test", "event": "started", "name": "tests::fails" }
+{ "type": "test", "event": "started", "name": "tests::ignored_plain" }
+{ "type": "test", "event": "started", "name": "tests::ignored_with_reason" }
+{ "type": "test", "event": "started", "name": "tests::noisy" }
+{ "type": "test", "event": "started", "name": "tests::panics_as_expected" }
+{ "type": "test", "event": "started", "name": "tests::passes" }
+{ "type": "test", "event": "started", "name": "tests::result_err" }
+{ "type": "test", "name": "tests::ignored_plain", "event": "ignored" }
+{ "type": "test", "event": "started", "name": "tests::should_panic_but_does_not" }
+{ "type": "test", "name": "tests::ignored_with_reason", "event": "ignored", "message": "needs a network" }
+{ "type": "test", "event": "started", "name": "tests::thread_panics" }
+{ "type": "test", "name": "shared_name", "event": "ok" }
+{ "type": "test", "name": "tests::fails", "event": "failed", "stdout": "thread 'tests::fails' panicked at src/lib.rs:55:9:\nassertion `left == right` failed: wrong sum\n  left: 3\n right: 4\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "tests::noisy", "event": "ok" }
+{ "type": "test", "name": "tests::panics_as_expected", "event": "ok" }
+{ "type": "test", "name": "tests::passes", "event": "ok" }
+{ "type": "test", "name": "tests::result_err", "event": "failed", "stdout": "Error: \"an error value\"\n" }
+{ "type": "test", "name": "tests::should_panic_but_does_not", "event": "failed", "message": "test did not panic as expected" }
+{ "type": "test", "name": "tests::thread_panics", "event": "ok" }
+{ "type": "suite", "event": "failed", "passed": 5, "failed": 3, "ignored": 2, "measured": 0, "filtered_out": 0, "exec_time": 0.000739625 }
+error: test failed, to rerun pass `--lib`
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-9000e6bde854bbdb)
+{ "type": "suite", "event": "started", "test_count": 1 }
+{ "type": "test", "event": "started", "name": "bin_test" }
+{ "type": "test", "name": "bin_test", "event": "ok" }
+{ "type": "suite", "event": "ok", "passed": 1, "failed": 0, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.000121708 }
+     Running tests/it.rs (/tmp/zoo-target/debug/deps/it-2fe4c8fe2e80b521)
+{ "type": "suite", "event": "started", "test_count": 3 }
+{ "type": "test", "event": "started", "name": "it_fails" }
+{ "type": "test", "event": "started", "name": "it_passes" }
+{ "type": "test", "event": "started", "name": "shared_name" }
+{ "type": "test", "name": "it_fails", "event": "failed", "stdout": "thread 'it_fails' panicked at tests/it.rs:11:5:\nintegration failure\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }
+{ "type": "test", "name": "it_passes", "event": "ok" }
+{ "type": "test", "name": "shared_name", "event": "ok" }
+{ "type": "suite", "event": "failed", "passed": 2, "failed": 1, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.000426291 }
+error: test failed, to rerun pass `--test it`
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-1500c3abaf4ad2db)
+{ "type": "suite", "event": "started", "test_count": 1 }
+{ "type": "test", "event": "started", "name": "slow_but_fine" }
+{ "type": "test", "name": "slow_but_fine", "event": "ok" }
+{ "type": "suite", "event": "ok", "passed": 1, "failed": 0, "ignored": 0, "measured": 0, "filtered_out": 0, "exec_time": 0.060996583 }
+   Doc-tests libtest-zoo
+{ "type": "suite", "event": "started", "test_count": 6 }
+{ "type": "test", "event": "started", "name": "src/lib.rs - add (line 7)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 16)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 20)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 24)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 28)" }
+{ "type": "test", "event": "started", "name": "src/lib.rs - boom (line 32)" }
+{ "type": "test", "name": "src/lib.rs - boom (line 28)", "event": "ignored" }
+{ "type": "test", "name": "src/lib.rs - boom (line 24)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - boom (line 20)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - add (line 7)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - boom (line 16)", "event": "ok" }
+{ "type": "test", "name": "src/lib.rs - boom (line 32)", "event": "failed", "stdout": "Test executable failed (exit status: 101).\n\nstderr:\nthread 'main' panicked at src/lib.rs:5:1:\nassertion `left == right` failed\n  left: 2\n right: 3\nstack backtrace:\n   0:     0xaaaaac0deb30 - std::backtrace_rs::backtrace::libunwind::trace::heaab0e590535aeb3\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/libunwind.rs:93:5\n   1:     0xaaaaac0deb30 - std::backtrace_rs::backtrace::trace_unsynchronized::h89cc7ae9ebb707d7\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/../../backtrace/src/backtrace/mod.rs:66:5\n   2:     0xaaaaac0deb30 - std::sys_common::backtrace::_print_fmt::h08c31be18fedf422\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:67:5\n   3:     0xaaaaac0deb30 - <std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display>::fmt::hc38bcf44d9e857e3\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:44:22\n   4:     0xaaaaac0fa890 - core::fmt::rt::Argument::fmt::ha5b752f9cd7ef4a3\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/rt.rs:138:9\n   5:     0xaaaaac0fa890 - core::fmt::write::h9fac187ae7486f3c\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/fmt/mod.rs:1094:21\n   6:     0xaaaaac0dc8f8 - std::io::Write::write_fmt::h239e9fb6296b3a7f\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/io/mod.rs:1714:15\n   7:     0xaaaaac0de964 - std::sys_common::backtrace::_print::h52f67cfa8753b0ab\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:47:5\n   8:     0xaaaaac0de964 - std::sys_common::backtrace::print::hdea7481e2c957a93\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:34:9\n   9:     0xaaaaac0dfef0 - std::panicking::default_hook::{{closure}}::h7c36fa733369c49e\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:270:22\n  10:     0xaaaaac0dfc18 - std::panicking::default_hook::h303eee75f9a8f6a8\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:290:9\n  11:     0xaaaaac0e04b4 - std::panicking::rust_panic_with_hook::h270c94381ec34744\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:707:13\n  12:     0xaaaaac0e037c - std::panicking::begin_panic_handler::{{closure}}::h3653e3502bcc1625\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:599:13\n  13:     0xaaaaac0df014 - std::sys_common::backtrace::__rust_end_short_backtrace::h6b8510f2f024eeeb\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/sys_common/backtrace.rs:170:18\n  14:     0xaaaaac0e00cc - rust_begin_unwind\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:595:5\n  15:     0xaaaaac0c6554 - core::panicking::panic_fmt::ha96945d7a1b20293\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/panicking.rs:67:14\n  16:     0xaaaaac0c67a4 - core::panicking::assert_failed_inner::h87e57bc677944fed\n  17:     0xaaaaac0c6d30 - core::panicking::assert_failed::h70d0a73c4c5c3c92\n  18:     0xaaaaac0c6dd0 - rust_out::main::_doctest_main_src_lib_rs_32_0::hdb7718f1c1ed7468\n  19:     0xaaaaac0c6d44 - rust_out::main::hb10ac33b109b5210\n  20:     0xaaaaac0c6c9c - core::ops::function::FnOnce::call_once::h1c1a4fe0e7e8fd9f\n  21:     0xaaaaac0c6b5c - std::sys_common::backtrace::__rust_begin_short_backtrace::h10a8781de03c812f\n  22:     0xaaaaac0c6bbc - std::rt::lang_start::{{closure}}::h477801b7d081b792\n  23:     0xaaaaac0dab98 - core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once::h88e11b183391c045\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/core/src/ops/function.rs:284:13\n  24:     0xaaaaac0dab98 - std::panicking::try::do_call::hf62418fc1f7ab0ba\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40\n  25:     0xaaaaac0dab98 - std::panicking::try::h96e06e195e92b5b2\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19\n  26:     0xaaaaac0dab98 - std::panic::catch_unwind::h81d0af01faa937a6\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14\n  27:     0xaaaaac0dab98 - std::rt::lang_start_internal::{{closure}}::hf32b9834747c984e\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:48\n  28:     0xaaaaac0dab98 - std::panicking::try::do_call::had623a98a0d3cc26\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:502:40\n  29:     0xaaaaac0dab98 - std::panicking::try::ha216a98a719bb195\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panicking.rs:466:19\n  30:     0xaaaaac0dab98 - std::panic::catch_unwind::h47218f3906a674ae\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/panic.rs:142:14\n  31:     0xaaaaac0dab98 - std::rt::lang_start_internal::h9020369f9618c61f\n                               at /rustc/cc66ad468955717ab92600c770da8c1601a4ff33/library/std/src/rt.rs:148:20\n  32:     0xaaaaac0c6b9c - std::rt::lang_start::hb596b9e8a1355df2\n  33:     0xaaaaac0c6df4 - main\n  34:     0xffff941f7780 - <unknown>\n  35:     0xffff941f7858 - __libc_start_main\n  36:     0xaaaaac0c6a70 - _start\n  37:                0x0 - <unknown>\n\n" }
+{ "type": "suite", "event": "failed", "passed": 4, "failed": 1, "ignored": 1, "measured": 0, "filtered_out": 0, "exec_time": 0.097388792 }
+error: doctest failed, to rerun pass `--doc`
+error: 3 targets failed:
+    `--lib`
+    `--test it`
+    `--doc`
+=== exit 101
+=== exact-lib
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-f12aa2eeabfcb19e)
+
+running 1 test
+test tests::passes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-test
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running tests/more-checks.rs (/tmp/zoo-target/debug/deps/more_checks-1500c3abaf4ad2db)
+
+running 1 test
+test slow_but_fine ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+=== exit 0
+=== exact-bin
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/bin/tool.rs (/tmp/zoo-target/debug/deps/tool-9000e6bde854bbdb)
+
+running 1 test
+test bin_test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-doc
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+   Doc-tests libtest-zoo
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+=== exit 0
+=== exact-missing
+    Finished test [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/tmp/zoo-target/debug/deps/libtest_zoo-f12aa2eeabfcb19e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+=== exit 0
+=== compile-error
+   Compiling libtest-zoo v0.1.0 (/tmp/zoo)
+error[E0425]: cannot find function `missing_fn` in this scope
+  --> src/lib.rs:50:31
+   |
+50 |         assert_eq!(add(1, 2), missing_fn());
+   |                               ^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `libtest-zoo` (lib test) due to previous error
+warning: build failed, waiting for other jobs to finish...
+=== exit 101

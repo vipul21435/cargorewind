@@ -64,6 +64,13 @@ def test_container_script() -> None:
     )
 
 
+def test_container_script_can_run_a_script_instead_of_the_test_command() -> None:
+    script = container_script(Overlay({"a.rs": b""}), script="echo 'a'\ncargo test\n")
+    assert script == (
+        "cd /home/rewind/repo && tar -xmf - && exec sh -c 'echo '\"'\"'a'\"'\"'\ncargo test\n' 2>&1"
+    )
+
+
 def test_container_script_checks_probe_words_before_cargo() -> None:
     script = container_script(Overlay({"a.rs": b""}), TEST_COMMAND, ("one", "two_2"))
     assert script == (
@@ -126,6 +133,20 @@ def test_docker_run_streams_overlay_and_isolates_network() -> None:
     assert "for w in fix_word;" in runner.calls[1]["argv"][-1]  # type: ignore[index]
 
 
+def test_docker_run_script_uses_its_own_container_name_and_the_script() -> None:
+    runner = FakeRunner(
+        [(("docker", "run"), CommandResult((), 0, "--- cargorewind: exit 0 ---\n", ""))]
+    )
+    overlay = Overlay({"src/lib.rs": b"x"})
+    result = DockerBackend(runner).run_script("img", "rerun-after", overlay, "cargo test\n")
+    assert result == RunResult(0, "--- cargorewind: exit 0 ---\n")
+    argv = runner.calls[0]["argv"]
+    assert isinstance(argv, tuple)
+    assert argv[argv.index("--name") + 1].startswith("cargorewind-rerun-after-")
+    assert argv[-1].endswith("&& exec sh -c 'cargo test\n' 2>&1")
+    assert runner.calls[0]["stdin"] == overlay.to_tar()
+
+
 def test_docker_run_without_overlay_sends_no_stdin_and_kills_on_timeout() -> None:
     runner = FakeRunner([(("docker", "run"), CommandResult((), 124, "", "", timed_out=True))])
     result = DockerBackend(runner).run_tests("img", "base", Overlay())
@@ -167,6 +188,9 @@ class _StubBackend:
     def open_session(self, tag: str) -> _StubSession:
         return self.session
 
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        return RunResult(0, f"{run}: {script}\n")
+
 
 def test_record_then_replay_round_trip(tmp_path: Path) -> None:
     context = _context(tmp_path / "ctx")
@@ -175,6 +199,7 @@ def test_record_then_replay_round_trip(tmp_path: Path) -> None:
     overlay = Overlay({"a": b"1"})
     recorder.build(context, "t")
     recorder.run_tests("t", "before", overlay)
+    recorder.run_script("t", "rerun-before", overlay, "echo one\necho two\n")
 
     data = json.loads(transcript.read_text())
     assert data["schema"] == 1
@@ -184,9 +209,19 @@ def test_record_then_replay_round_trip(tmp_path: Path) -> None:
     assert data["runs"]["before"]["script_sha256"] == sha256_text(script)
     assert "steps" not in data  # no session, no steps: old transcripts stay unchanged
 
+    rerun = data["runs"]["rerun-before"]
+    assert rerun["script_sha256"] == sha256_text(
+        container_script(overlay, script="echo one\necho two\n")
+    )
+    assert rerun["output"] == "rerun-before: echo one\necho two\n\n"
+
     replay = ReplayBackend(transcript)
     assert replay.build(context, "other-tag").image_id == "sha256:img-final"
     assert replay.run_tests("t", "before", overlay) == RunResult(0, "test before ... ok\n")
+    again = replay.run_script("t", "rerun-before", overlay, "echo one\necho two\n")
+    assert again.output == rerun["output"]
+    with pytest.raises(ReplayError, match="script of stage 'rerun-before' differs"):
+        replay.run_script("t", "rerun-before", overlay, "echo three\n")
 
 
 def test_record_then_replay_stage_builds_and_session_steps(tmp_path: Path) -> None:

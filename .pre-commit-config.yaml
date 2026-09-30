@@ -6,6 +6,9 @@ repos:
       - id: check-toml
       - id: end-of-file-fixer
       - id: trailing-whitespace
+        # Recorded cargo test output: libtest prints "test name ... " with a trailing
+        # space before a test's own output, and the fixtures keep it byte for byte.
+        exclude: ^tests/fixtures/libtest/rust-.*\.txt$
       - id: check-added-large-files
         # The demo git bundle (full strsim-rs history up to the fix) is about 650 KB.
         args: ["--maxkb=1024"]

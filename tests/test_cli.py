@@ -12,12 +12,14 @@ from cargorewind import __version__, cli, registry
 from cargorewind.backend import ReplayBackend
 from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.deps import Pin
-from cargorewind.libtest import Outcome, compute_flip
+from cargorewind.flip import Flaky, compute_flip
+from cargorewind.libtest import Status
 from cargorewind.probes import ProbeReport
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
 from cargorewind.runner import CommandResult
 from tests.test_buildcache import FakeBuilder, FakeDocker
 from tests.test_deps import INDEX, FakeCargo
+from tests.test_flip import stage
 from tests.test_gitops import linked_repo
 from tests.test_registry import FakeHttp, recorded
 from tests.test_rewind import FIXED, HOME_MANIFEST, LIB, CargoModelSession, ScriptedBackend
@@ -81,8 +83,31 @@ def test_rewind_replay_prints_verified_flip(tmp_path: Path) -> None:
     assert "probes        2 identifier(s) passed" in result.stdout
     assert "probe     in Docker: build passed, before passed, after passed" in result.stdout
     assert "(cache off: no build cache (replay, record or --no-build-cache))" in result.stdout
+    assert "rerun     before exit   0  3 x 104 test(s) by exact name, 0 changed" in result.stdout
+    assert "reruns        3 x by exact name (104 in before, 104 in after)" in result.stdout
+    assert "flaky" not in result.stdout
     assert (tmp_path / "out" / "task.json").is_file()
     assert (tmp_path / "out" / "recipe.json").is_file()
+    assert (tmp_path / "out" / "logs" / "rerun-after.log").is_file()
+
+
+def test_rewind_rerun_options_reach_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[Any] = []
+
+    def fake_rewind(options: Any, *args: Any) -> Any:
+        captured.append(options)
+        raise cli.GitError("stop here")
+
+    monkeypatch.setattr(cli, "rewind", fake_rewind)
+    args = _demo_args(tmp_path, "--replay", str(DEMO / "transcript.json"))
+    runner.invoke(cli.app, [*args, "--reruns", "5", "--test-timeout", "42"])
+    assert (captured[0].reruns, captured[0].test_timeout) == (5, 42)
+    runner.invoke(cli.app, args)
+    assert (captured[1].reruns, captured[1].test_timeout) == (3, 300)
+    refused = runner.invoke(cli.app, [*args, "--reruns", "-1"])
+    assert refused.exit_code == 2 and len(captured) == 2
 
 
 def test_rewind_record_writes_a_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,12 +205,17 @@ def test_rewind_reports_errors_with_exit_code_1(tmp_path: Path) -> None:
 def test_rewind_exits_2_when_the_flip_is_not_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    flip = compute_flip({"a": Outcome.PASSED}, {"a": Outcome.PASSED}, {"a": Outcome.FAILED})
+    flip = compute_flip(
+        stage("base", {"a": Status.PASSED}),
+        stage("before", {"a": Status.PASSED}),
+        stage("after", {"a": Status.FAILED}),
+    )
     report = SimpleNamespace(
         flip=flip,
         lock=SimpleNamespace(bound=object()),
         probes=ProbeReport(),
         verified=flip.verified,
+        reruns={},
     )
     monkeypatch.setattr(cli, "rewind", lambda *args: report)
     missing = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", "x.json"))
@@ -194,6 +224,13 @@ def test_rewind_exits_2_when_the_flip_is_not_verified(
     result = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", str(DEMO / "transcript.json")))
     assert result.exit_code == 2
     assert "regressions   1: a" in result.stdout
+    assert "reruns" not in result.stdout
+    flip.flaky.append(Flaky("b", "outcome changed"))
+    report.reruns = {"after": SimpleNamespace(items=[1, 2])}
+    report.rerun_rounds = 2
+    again = runner.invoke(cli.app, _demo_args(tmp_path, "--replay", str(DEMO / "transcript.json")))
+    assert "reruns        2 x by exact name (2 in after)" in again.stdout
+    assert "flaky         1: b" in again.stdout
     assert "NOT VERIFIED" in result.stdout
     assert "lock.json, Cargo.lock, probes.json, recipe.json, Dockerfile" in result.stdout
     assert "probes        none (no new identifier to probe)" in result.stdout

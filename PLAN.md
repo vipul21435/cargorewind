@@ -341,6 +341,54 @@ green, pushed, and the README describes it with real output.
   A cache that cannot be written (read-only home, a file in its place) is noted once in
   `lock.json` and the fetched answer is used, like the digest cache.
 
+### Decisions made while building slice 5 (2026-09-30)
+
+- One parser reads both libtest formats line by line: JSON events where a line parses
+  as one, cargo's `Running` and `Doc-tests` lines (which stay text even with
+  `--format json`) to know the binary, and the text result lines otherwise. A text
+  result line whose status is missing (`--nocapture`, `--test-threads=1`, or a panic
+  from another thread that split the line, all recorded on 1.39.0) stays pending until
+  a line that is only a status; a test that started and never reported failed, or timed
+  out when the run was stopped.
+- A test is identified by (cargo target, stable name). Binaries resolve to targets
+  through the layout of the fix and base commits (the crate-style binary name, plus the
+  source path newer cargo prints; old cargo prints only the binary, where the library
+  wins over a test target of the same name), with path conventions for targets the
+  layout does not list and an `unknown` target (no selector, every binary runs and the
+  result is picked by binary) as the last resort. The id in the lists is the name alone
+  unless two targets share it (`shared_name [test it]`), so the strsim-rs task keeps
+  its names.
+- Mode suffixes (` - should panic`, ` - compile fail`, ` - compile`) are display only
+  and leave the name, so text and JSON names agree and `--exact` matches. Doctests of
+  the crate's own docs have no item (`src/lib.rs - (line 8)`, seen on which-rs) and get
+  the stable name `src/lib.rs - (crate)`.
+- rustdoc splits its test arguments on whitespace, so a doctest cannot be selected by
+  its exact name (`cargo test --doc -- --exact "src/lib.rs - add (line 7)"` ran 0 tests
+  on 1.39.0, 1.73.0 and 1.98.1). Doctests are rerun with the item path as a substring
+  filter (`--doc -- add`) and the exact name is picked from the output. libtest
+  before 1.5x ignores every filter but the first, so each rerun is one cargo
+  invocation (about 7 ms each on 1.39.0 when nothing changed).
+- Reruns: every FAIL_TO_PASS and PASS_TO_PASS candidate, N times (default 3, `--reruns
+  0` turns them off), in one container per stage (`rerun-after` for all candidates,
+  `rerun-before` for those the before run reported, `rerun-base` for PASS_TO_PASS
+  tests whose verdict came from the base run because before did not build). Each
+  command runs under coreutils `timeout` (`--test-timeout`, default 300 s; exit 124 or
+  137 is `timeout`). Statuses: passed, failed, ignored, compile-error (the segment shows
+  a build error and no binary started), timeout, missing (the run finished without
+  reporting the test). A candidate whose outcomes differ between the stage run and any
+  rerun leaves both lists with the reason; the flip stays verified when a FAIL_TO_PASS
+  test remains. The reruns are recorded and replayed like the stage runs
+  (`runs["rerun-<stage>"]`), so the strsim-rs transcript was re-recorded live (21 s
+  including 2 x 3 x 104 reruns).
+- The JSON format is requested only for nightly channels installed with rustup
+  (`-- -Z unstable-options --format json` on the stage and rerun commands; the recipe
+  hash changes for those recipes only). The JSON fixtures were recorded on stable
+  images with `RUSTC_BOOTSTRAP=1`, which unlocks the same libtest code path; the text
+  fixtures come from the same three images (1.39.0, 1.73.0, 1.98.1) running the
+  `tests/fixtures/libtest/zoo` crate (`record.sh`).
+- `task.json` keeps schema 1 and gains `runs.<stage>.state`, `reruns`, `tests` (target,
+  rerun command, status per stage, rerun outcomes for every test seen) and `flaky`.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.
@@ -379,7 +427,7 @@ green, pushed, and the README describes it with real output.
 - [x] 2. Toolchain inference from toolchain files, MSRV, edition and a dated stable table
 - [x] 3. Dependency reproducibility: locked fetch, date-bounded lockfile, vendoring
 - [x] 4. Dockerfile generation with sanity probes and a recipe-hash build cache
-- [ ] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
+- [x] 5. Test execution by exact name, libtest text and JSON parsing, flaky detection
 - [ ] 6. Task bundle export, `verify` command and batch recipes with two-crate e2e
 
 ### 1. Rust-aware patch split and `#[cfg(test)]` report

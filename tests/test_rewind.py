@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from cargorewind.crateindex import DirectoryIndex
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
 from cargorewind.dockerfile import PROBE_MARKER
 from cargorewind.gitops import GitError
+from cargorewind.libtest import Status, parse_libtest
 from cargorewind.probes import HostCheck, ProbeReport
 from cargorewind.registry import HttpResponse, ImageResolver, RegistryClient
 from cargorewind.rewind import ProbeError, RewindOptions, rewind
@@ -80,11 +83,21 @@ class CargoModelSession:
         self.closed = True
 
 
+RerunHook = Callable[[str, int, str], Status | None]  # (stage, round, test name) -> status
+
+
 class ScriptedBackend:
-    """Answers each stage with canned libtest output and records what it was sent."""
+    """Answers each stage with canned libtest output and records what it was sent.
+
+    Rerun scripts are answered test by test from the stage's output, unless ``reruns``
+    gives another status for that stage, round and test (flaky scenarios).
+    """
 
     def __init__(
-        self, outputs: dict[str, tuple[int, str]], session: CargoModelSession | None = None
+        self,
+        outputs: dict[str, tuple[int, str]],
+        session: CargoModelSession | None = None,
+        reruns: RerunHook | None = None,
     ) -> None:
         self.outputs = outputs
         self.overlays: dict[str, Overlay] = {}
@@ -95,6 +108,9 @@ class ScriptedBackend:
         self.tags: dict[str, str] = {}
         self.dockerfile = ""
         self.session = session
+        self.reruns = reruns
+        self.scripts: dict[str, str] = {}
+        self.rerun_overlays: dict[str, Overlay] = {}
 
     def build(
         self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
@@ -123,6 +139,36 @@ class ScriptedBackend:
     def open_session(self, tag: str) -> CargoModelSession:
         assert self.session is not None, "no session expected"
         return self.session
+
+    def run_script(self, tag: str, run: str, overlay: Overlay, script: str) -> RunResult:
+        self.scripts[run] = script
+        self.rerun_overlays[run] = overlay
+        stage = run.removeprefix("rerun-")
+        known = parse_libtest(self.outputs[stage][1]).by_name()
+        out: list[str] = []
+        round_ = 0
+        for line in script.splitlines():
+            begin = re.match(r"^echo '(--- cargorewind: rerun (\d+) \d+ ---)'$", line)
+            if begin is not None:
+                out.append(begin.group(1))
+                round_ = int(begin.group(2))
+                continue
+            command = re.match(r"^timeout -k \d+ \d+ (.*) 2>&1; echo ", line)
+            assert command is not None, line
+            argv = shlex.split(command.group(1))
+            name = argv[argv.index("--exact") + 1] if "--exact" in argv else argv[-1]
+            status = (self.reruns(stage, round_, name) if self.reruns else None) or known.get(name)
+            if status is None:
+                out += ["running 0 tests", "--- cargorewind: exit 0 ---"]
+                continue
+            word = {Status.PASSED: "ok", Status.FAILED: "FAILED", Status.IGNORED: "ignored"}[status]
+            code = 101 if status is Status.FAILED else 0
+            out += [
+                "running 1 test",
+                f"test {name} ... {word}",
+                f"--- cargorewind: exit {code} ---",
+            ]
+        return RunResult(0, "\n".join(out) + "\n")
 
 
 def _crate(repo: GitRepo, lockfile: bool) -> tuple[str, str]:
@@ -179,10 +225,39 @@ def test_rewind_synthetic_crate_end_to_end(
     assert task["runs"]["before"] == {
         "exit_code": 101,
         "timed_out": False,
+        "state": "ran",
         "passed": 1,
         "failed": 1,
         "ignored": 0,
     }
+    # Both candidates were rerun three times by exact name in before and after.
+    assert sorted(backend.scripts) == ["rerun-after", "rerun-before"]
+    assert backend.scripts["rerun-after"].count("cargo test -- --exact tests::two") == 3
+    assert backend.rerun_overlays["rerun-after"] == backend.overlays["after"]
+    assert task["reruns"]["rounds"] == 3 and task["reruns"]["test_timeout"] == 300
+    assert task["reruns"]["stages"]["before"] == {
+        "tests": 2,
+        "exit_code": 0,
+        "timed_out": False,
+        "changed": 0,
+        "log": "logs/rerun-before.log",
+    }
+    assert task["tests"]["tests::two"] == {
+        "target": "unknown",
+        "name": "tests::two",
+        "command": "cargo test -- --exact tests::two",
+        "base": "missing",
+        "before": "failed",
+        "after": "passed",
+        "reruns": {"before": ["failed"] * 3, "after": ["passed"] * 3},
+    }
+    assert task["flaky"] == []
+    assert (
+        (out / "logs" / "rerun-after.log").read_text().startswith("--- cargorewind: rerun 1 0 ---")
+    )
+    assert any(
+        ln.startswith("rerun     after  exit   0  3 x 2 test(s) by exact name") for ln in lines
+    )
     assert "RUN cargo fetch --locked" in backend.dockerfile
     # The checkout carries rust-toolchain, so rustup must not follow it at run time.
     assert "ENV RUSTUP_TOOLCHAIN=1.70.0" in backend.dockerfile
@@ -338,6 +413,131 @@ TRIPLE_RUNS = {
     "before": (101, "error[E0425]: cannot find function `triple` in this scope\n"),
     "after": (0, "test tests::zero ... ok\ntest tests::triple_works ... ok\n"),
 }
+
+
+def test_rewind_marks_a_test_flaky_when_a_rerun_changes_its_outcome(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+
+    def flaky(stage: str, round_: int, name: str) -> Status | None:
+        if (stage, round_, name) == ("after", 2, "tests::two"):
+            return Status.FAILED
+        if (stage, name) == ("before", "tests::zero") and round_ == 3:
+            return Status.IGNORED
+        return None
+
+    backend = ScriptedBackend(PASSING, reruns=flaky)
+    lines: list[str] = []
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", base=base, reruns=3)
+    report = rewind(options, SubprocessRunner(), backend, lines.append)
+
+    assert report.flip is not None and not report.flip.verified
+    task = json.loads((out / "task.json").read_text())
+    assert task["FAIL_TO_PASS"] == [] and task["PASS_TO_PASS"] == []
+    assert task["flaky"] == [
+        {
+            "id": "tests::two",
+            "reason": "outcome changed between the stage run and its reruns: "
+            "after passed, passed, failed, passed",
+        },
+        {
+            "id": "tests::zero",
+            "reason": "outcome changed between the stage run and its reruns: "
+            "before passed, passed, passed, ignored",
+        },
+    ]
+    assert task["tests"]["tests::two"]["reruns"] == {
+        "before": ["failed"] * 3,
+        "after": ["passed", "failed", "passed"],
+    }
+    assert task["reruns"]["stages"]["after"]["changed"] == 1
+    assert task["verified"] is False
+    assert "rerun     after  exit   0  3 x 2 test(s) by exact name, 1 changed outcome" in lines
+    assert any(ln.startswith("flaky     tests::two: outcome changed") for ln in lines)
+
+
+def test_rewind_without_reruns_and_with_a_base_rerun_for_a_compile_error(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    base, fix = _crate(repo, lockfile=True)
+    backend = ScriptedBackend(PASSING)
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", base=base, reruns=0)
+    report = rewind(options, SubprocessRunner(), backend, lambda _: None)
+    assert report.flip is not None and report.flip.verified
+    assert backend.scripts == {} and report.reruns == {}
+    task = json.loads((out / "task.json").read_text())
+    assert task["reruns"] == {"rounds": 0, "test_timeout": 300, "stages": {}}
+    assert task["tests"]["tests::two"]["reruns"] == {}
+
+    # The before run does not compile: PASS_TO_PASS came from base, so base is rerun.
+    triple = make_repo("triple")
+    fix = _triple_crate(triple)
+    backend = ScriptedBackend(TRIPLE_RUNS)
+    options = RewindOptions(str(triple.path), fix, out, tmp_path / "w2", reruns=2, test_timeout=9)
+    report = rewind(options, SubprocessRunner(), backend, lambda _: None)
+    assert report.flip is not None and report.flip.verified
+    assert sorted(backend.scripts) == ["rerun-after", "rerun-base"]
+    assert "timeout -k 10 9 cargo test -- --exact tests::zero" in backend.scripts["rerun-base"]
+    assert "tests::triple_works" not in backend.scripts["rerun-base"]
+    task = json.loads((out / "task.json").read_text())
+    assert task["runs"]["before"]["state"] == "compile-error"
+    assert task["tests"]["tests::triple_works"]["before"] == "compile-error"
+    assert task["tests"]["tests::zero"]["reruns"] == {
+        "base": ["passed"] * 2,
+        "after": ["passed"] * 2,
+    }
+    assert task["reruns"]["stages"]["base"]["tests"] == 1
+
+
+def test_rewind_asks_a_nightly_toolchain_for_json_output(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    manifest = '[package]\nname = "demo"\nversion = "0.1.0"\n'
+    files = {
+        "Cargo.toml": manifest,
+        "src/lib.rs": LIB,
+        "Cargo.lock": "version = 3\n",
+        "rust-toolchain": "nightly-2024-01-01\n",
+    }
+    repo.commit("base", files, "2024-01-10T12:00:00+00:00")
+    fix = repo.commit("fix", {"src/lib.rs": FIXED}, "2024-01-11T12:00:00+00:00")
+    json_runs = {
+        stage: (code, "".join(_json_line(line) for line in text.splitlines()))
+        for stage, (code, text) in PASSING.items()
+    }
+    backend = ScriptedBackend(json_runs)
+    out = tmp_path / "out"
+    options = RewindOptions(str(repo.path), fix, out, tmp_path / "work", reruns=1)
+    report = rewind(options, SubprocessRunner(), backend, lambda _: None)
+    assert report.flip is not None and report.flip.fail_to_pass == ["tests::two"]
+    json_args = ("--", "-Z", "unstable-options", "--format", "json")
+    assert backend.commands["after"] == ("cargo", "test", "--no-fail-fast", *json_args)
+    assert (
+        "cargo test -- --exact tests::two -Z unstable-options --format json"
+        in (backend.scripts["rerun-after"])
+    )
+    task = json.loads((out / "task.json").read_text())
+    assert task["test_command"].endswith("--format json")
+    assert task["runs"]["after"] == {
+        "exit_code": 0,
+        "timed_out": False,
+        "state": "ran",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+    }
+
+
+def _json_line(text_line: str) -> str:
+    name, _, word = text_line.removeprefix("test ").partition(" ... ")
+    event = {"ok": "ok", "FAILED": "failed"}[word]
+    return json.dumps({"type": "test", "name": name, "event": event}) + "\n"
 
 
 def test_rewind_probes_a_new_function_of_the_fix(

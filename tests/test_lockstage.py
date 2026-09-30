@@ -13,6 +13,7 @@ from cargorewind.lockstage import (
     cargo_version,
     default_index,
     first_dockerfile,
+    nightly,
     plan_lock,
     recipe_for,
     recipe_tag,
@@ -157,6 +158,29 @@ def test_default_index_and_recipe_tags(tmp_path: Path) -> None:
     assert tag == f"cargorewind/strsim-rs:{recipe.hash[:16]}"
     other = Recipe(recipe.image, "1.39.0", "c4cdd9c35dfb")
     assert recipe_tag("strsim-rs", other) != tag
+
+
+def test_recipe_for_a_nightly_toolchain_asks_libtest_for_json() -> None:
+    tree = MemoryTree({"Cargo.toml": MANIFEST, "Cargo.lock": ""})
+    dated = Toolchain("nightly-2024-01-01", "rust-toolchain", "", "1.98.1", install=True)
+    plan = plan_lock(tree, dated, CUTOFF, vendor=True)
+    recipe = recipe_for("rust:1.98.1-slim@sha256:" + "c" * 64, dated, "abc123", plan)
+    assert recipe.test_command == (
+        "cargo",
+        "test",
+        "--no-fail-fast",
+        "--offline",
+        "--",
+        "-Z",
+        "unstable-options",
+        "--format",
+        "json",
+    )
+    stable = Toolchain("1.60.0", "release-date", "")
+    plain = recipe_for("rust:1.60.0-slim@sha256:" + "c" * 64, stable, "abc123", plan)
+    assert plain.test_command == ("cargo", "test", "--no-fail-fast", "--offline")
+    beta = Toolchain("beta-2024-01-01", "rust-toolchain", "", "1.98.1", install=True)
+    assert not nightly(beta) and nightly(dated)
 
 
 def test_recipe_for_a_bounded_plan_starts_with_the_toolchain_stage_only() -> None:

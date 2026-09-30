@@ -36,6 +36,7 @@ from cargorewind.dockerfile import (
     Recipe,
     render_dockerfile,
     render_toolchain_stage,
+    stage_test_command,
 )
 from cargorewind.gitops import Git, repo_slug
 from cargorewind.layout import SourceTree
@@ -161,7 +162,13 @@ def recipe_for(
         cutoff=plan.cutoff.isoformat() if plan.strategy is LockStrategy.BOUNDED else "",
         vendor=plan.vendor,
         cargo_config=plan.cargo_config,
+        test_command=stage_test_command(plan.vendor, json_format=nightly(toolchain)),
     )
+
+
+def nightly(toolchain: Toolchain) -> bool:
+    """A nightly channel installed with rustup, whose libtest takes ``--format json``."""
+    return toolchain.install and toolchain.version.startswith("nightly")
 
 
 def default_index(cutoff: datetime, cache_dir: Path | None = None) -> CrateIndex:
