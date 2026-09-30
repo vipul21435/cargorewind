@@ -103,12 +103,17 @@ run.
 - **Dependencies fixed three ways.** A committed `Cargo.lock` has its format version
   detected (v1 to v4, including the pre-1.22 `[root]` table) and is fetched with
   `cargo fetch --locked`. Without one, a crate with no crates.io dependencies lets
-  cargo write the lockfile in the image. Otherwise the lockfile is **bounded by the
-  commit date**: cargo generates one in a container of the chosen toolchain, and a pin
-  loop moves every crates.io entry published at or after the fix commit's committer
-  time to the newest non-yanked version published before it that satisfies every
-  requirement on it (from the workspace manifests, or from the index entry of each
-  dependent's locked version). It runs `cargo update -p name:version --precise`,
+  cargo write the lockfile in the image. The manifests read for that are the root, the
+  workspace members and every path dependency they reach; a git dependency (or a path
+  dependency outside the repository) can bring crates.io packages too, so it counts as
+  one. Otherwise the lockfile is **bounded by the commit date**: cargo generates one in
+  a container of the chosen toolchain, and a pin loop moves every crates.io entry
+  published at or after the fix commit's committer time to the newest non-yanked
+  version published before it that satisfies every requirement on it (from the
+  manifests, or from the index entry of each dependent's locked version). A dependent
+  that asks for the same crate twice (a renamed second version, optional aliases)
+  constrains each lockfile edge only with the requirement its locked version meets,
+  the one cargo resolved. It runs `cargo update -p name:version --precise`,
   reads the lockfile again and repeats from the top of the dependency graph down,
   because older versions bring older transitive dependencies. If cargo refuses a pin,
   the next older version is tried. Entries that cannot be bounded are reported, and
@@ -877,9 +882,10 @@ The scanner timing ran `scan_source` 20 times on `src/lib.rs` at `605c81c9b9` in
 ## Known issues
 
 - Date bounding covers crates.io only. Git dependencies resolve to their branch head
-  when the lockfile is generated, alternate registries are skipped with a note, and
-  path dependencies outside the workspace add requirements the planner does not read
-  (cargo refuses a pin that breaks them, and the entry is reported).
+  when the lockfile is generated, and alternate registries are skipped with a note.
+  The requirements that a git dependency, or a path dependency outside the repository,
+  places on crates.io packages are not read (cargo refuses a pin that breaks them, and
+  the entry is reported).
 - Yanked versions are never picked, even when they were still live at the commit date:
   the index only has today's yanked flag. The pin loop does not read `rust_version`,
   so a version published before the commit that declares a newer `rust-version` than

@@ -316,6 +316,25 @@ green, pushed, and the README describes it with real output.
 - `cargorewind cache list` and `cache prune` (dangling images of this project, then
   index entries whose image is gone) are a Typer sub-app.
 
+### Decisions made while fixing the slice 3 and 4 review findings (2026-09-30)
+
+- A dependent that asks for one crate several times (a renamed second version, optional
+  aliases of different versions, per-target tables) constrains each lockfile edge only
+  with the requirements its locked version satisfies, because that is the requirement
+  cargo resolved the edge against. When none is satisfied, all are kept (the entry is
+  then reported). The fake resolver in the tests checks each edge against its own
+  requirement too, so the unit tests can no longer hide this.
+- The manifest scan follows path dependencies (transitively, once per manifest; paths
+  in `[workspace.dependencies]` are relative to the workspace root), because cargo makes
+  them workspace members and resolves their crates.io dependencies. A git dependency,
+  or a path dependency outside the tree or without a readable manifest, may bring
+  crates.io packages that only a generated lockfile shows, so it also selects the
+  date-bounded strategy (the pin loop reads the lockfile, not the manifests). The
+  generated strategy is left for crates whose whole reachable graph has no crates.io
+  or git dependency.
+- `BoundLock.pins()` drops a pin only when it failed in its own round, so the summary
+  counts a pin that cargo accepted on retry.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.

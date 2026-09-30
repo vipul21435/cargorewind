@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from cargorewind.backend import BuildResult
 from cargorewind.crateindex import SparseIndex
 from cargorewind.dockerfile import LockStrategy, Recipe
 from cargorewind.layout import MemoryTree
@@ -15,8 +16,11 @@ from cargorewind.lockstage import (
     plan_lock,
     recipe_for,
     recipe_tag,
+    run_pin_loop,
 )
 from cargorewind.toolchain import Toolchain, ToolchainError
+from tests.test_deps import INDEX, FakeCargo
+from tests.test_rewind import CargoModelSession
 
 CUTOFF = datetime(2019, 12, 13, 2, 48, 41, tzinfo=UTC)
 MANIFEST = '[package]\nname = "demo"\n[dependencies]\nhome = "0.5"\n'
@@ -62,6 +66,65 @@ def test_plan_lock_strategies(
     plan = plan_lock(MemoryTree(files), Toolchain("1.60.0", "", ""), CUTOFF, vendor=False)
     assert plan.strategy is strategy
     assert plan.lines() == [first_line]
+
+
+def test_plan_lock_bounds_dependencies_reached_through_path_or_git_crates() -> None:
+    # Regression: a root crate whose only dependency is a path crate that depends on
+    # regex and serde got the "generated" strategy, so cargo locked today's versions.
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[package]\nname = "app"\n[dependencies]\n'
+            'core-impl = { path = "core", version = "0.1" }\n',
+            "core/Cargo.toml": '[package]\nname = "core-impl"\n[dependencies]\n'
+            'regex = "1"\nserde = "1"\n',
+        }
+    )
+    plan = plan_lock(tree, Toolchain("1.60.0", "", ""), CUTOFF, vendor=False)
+    assert plan.strategy is LockStrategy.BOUNDED
+    assert [(r.member, r.name) for r in plan.requirements] == [
+        ("core-impl", "regex"),
+        ("core-impl", "serde"),
+    ]
+    git_only = MemoryTree(
+        {"Cargo.toml": '[package]\nname = "app"\n[dependencies]\nx = { git = "https://e.x/x" }\n'}
+    )
+    plan = plan_lock(git_only, Toolchain("1.60.0", "", ""), CUTOFF, vendor=False)
+    assert plan.strategy is LockStrategy.BOUNDED
+    assert plan.lines() == [
+        "lockfile  none: no crates.io requirement in the manifests, but 1 dependency(ies) can "
+        "bring some; bounding every package to before 2019-12-13T02:48:41+00:00",
+        "note      Cargo.toml: x: a git dependency; cargo resolves its dependencies",
+    ]
+
+
+def test_pin_loop_summary_counts_a_retried_pin(tmp_path: Path) -> None:
+    # Regression: the summary dropped a pin that cargo accepted on retry, because the
+    # refused attempt in the round before had the same spec.
+    cargo = FakeCargo(INDEX, {"demo": [("home", "0.5.4")]}, refuse=frozenset({("home", "0.5.9")}))
+    session = CargoModelSession(cargo)
+
+    class Backend:
+        def build(
+            self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+        ) -> BuildResult:
+            return BuildResult("sha256:stage", "")
+
+        def open_session(self, tag: str) -> CargoModelSession:
+            return session
+
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    plan = plan_lock(
+        MemoryTree({"Cargo.toml": '[package]\nname = "demo"\n[dependencies]\nhome = "0.5.4"\n'}),
+        Toolchain("1.60.0", "", ""),
+        datetime(2024, 3, 1, tzinfo=UTC),
+        vendor=False,
+    )
+    lines: list[str] = []
+    bound = run_pin_loop(plan, Backend(), tmp_path, INDEX, lines.append)  # type: ignore[arg-type]
+    assert session.closed and bound.bounded
+    assert lines[-1] == "lock      1 pin(s) in 2 round(s); every crates.io package is bounded"
+    assert [p.to_version for p in bound.pins() if p.name == "home"] == ["0.5.5"]
+    assert (tmp_path / "Cargo.lock").read_text() == bound.lockfile
 
 
 def test_vendor_needs_cargo_vendor_and_picks_the_config_file_name() -> None:

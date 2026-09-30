@@ -75,6 +75,7 @@ class LockPlan:
     requirements: list[Requirement] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     bound: BoundLock | None = None
+    opaque: list[str] = field(default_factory=list)  # git or unreadable path dependencies
 
     @property
     def cargo_config(self) -> str:
@@ -93,10 +94,16 @@ class LockPlan:
             lines = [
                 "lockfile  none, and no crates.io dependencies: cargo generates it in the image"
             ]
-        else:
+        elif self.requirements:
             lines = [
                 f"lockfile  none: {len(self.requirements)} crates.io requirement(s); "
                 f"bounding every package to before {self.cutoff.isoformat()}"
+            ]
+        else:
+            lines = [
+                f"lockfile  none: no crates.io requirement in the manifests, but "
+                f"{len(self.opaque)} dependency(ies) can bring some; bounding every package "
+                f"to before {self.cutoff.isoformat()}"
             ]
         if self.vendor:
             config = f"~/.cargo/{self.cargo_config}"
@@ -116,9 +123,14 @@ def plan_lock(tree: SourceTree, toolchain: Toolchain, cutoff: datetime, vendor: 
     if text is not None:
         version = parse_lockfile(text).format_version
         return LockPlan(LockStrategy.COMMITTED, cutoff, cargo, vendor, version)
-    requirements, notes = manifest_requirements(tree)
-    strategy = LockStrategy.BOUNDED if requirements else LockStrategy.GENERATED
-    return LockPlan(strategy, cutoff, cargo, vendor, None, requirements, notes)
+    # Path dependencies are followed; a git dependency (or a path dependency the tree
+    # does not hold) can still bring crates.io packages, which only the lockfile cargo
+    # generates shows, so the pin loop runs for those too.
+    scan = manifest_requirements(tree)
+    strategy = LockStrategy.BOUNDED if scan.needs_bounding else LockStrategy.GENERATED
+    return LockPlan(
+        strategy, cutoff, cargo, vendor, None, scan.requirements, scan.notes, opaque=scan.opaque
+    )
 
 
 def recipe_for(

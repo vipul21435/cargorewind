@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from cargorewind.deps import (
     Requirement,
     bound_lockfile,
     cargo_script,
+    edge_requirements,
     manifest_requirements,
     parse_script_output,
 )
@@ -80,7 +82,8 @@ shared = { version = "1.2", features = ["x"] }
             "crates/broken/Cargo.toml": "[package\n",
         }
     )
-    found, notes = manifest_requirements(tree)
+    scan = manifest_requirements(tree)
+    found, notes = scan.requirements, scan.notes
     assert [(r.member, r.name, r.req, r.kind, r.target, r.optional) for r in found] == [
         ("app", "home", "0.5.4", "normal", None, False),
         ("app", "rand", "0.8", "normal", None, True),
@@ -95,18 +98,57 @@ shared = { version = "1.2", features = ["x"] }
     assert notes == [
         "Cargo.toml: private: an alternate registry, not bounded by date",
         "Cargo.toml: missing: workspace = true, but [workspace.dependencies] has no missing",
+        "Cargo.toml: remote: a git dependency; cargo resolves its dependencies",
     ]
+    assert scan.opaque == [notes[-1]] and scan.needs_bounding
 
 
 def test_manifest_requirements_without_a_manifest() -> None:
-    assert manifest_requirements(MemoryTree({})) == ([], ["no readable Cargo.toml at the root"])
+    scan = manifest_requirements(MemoryTree({}))
+    assert (scan.requirements, scan.notes, scan.opaque) == (
+        [],
+        ["no readable Cargo.toml at the root"],
+        [],
+    )
+    assert not scan.needs_bounding
     string_inherited = MemoryTree(
         {
             "Cargo.toml": '[package]\nname = "a"\n[dependencies]\nx = { workspace = true }\n'
             '[workspace.dependencies]\nx = "2"\n'
         }
     )
-    assert [r.req for r in manifest_requirements(string_inherited)[0]] == ["2"]
+    assert [r.req for r in manifest_requirements(string_inherited).requirements] == ["2"]
+
+
+def test_manifest_requirements_follow_path_dependencies() -> None:
+    # Regression: crates.io dependencies reached only through a path dependency were
+    # never read, so the crate counted as having none and cargo resolved them to today.
+    tree = MemoryTree(
+        {
+            "Cargo.toml": '[package]\nname = "app"\n[dependencies]\n'
+            'core-impl = { path = "core", version = "0.1" }\n'
+            "shared = { workspace = true }\n"
+            'up = { path = "../outside" }\n'
+            'gone = { path = "missing" }\n'
+            "bad = { path = 7 }\n"
+            '[workspace.dependencies]\nshared = { path = "libs/shared" }\n',
+            "core/Cargo.toml": '[package]\nname = "core-impl"\n[dependencies]\n'
+            'regex = "1"\nserde = "1"\nback = { path = ".." }\n'
+            "[dev-dependencies]\n"
+            'again = { path = "../libs/shared" }\n',
+            "libs/shared/Cargo.toml": '[package]\nname = "shared"\n[dependencies]\nlog = "0.4"\n',
+        }
+    )
+    scan = manifest_requirements(tree)
+    assert [(r.member, r.name, r.req, r.kind) for r in scan.requirements] == [
+        ("core-impl", "regex", "1", "normal"),
+        ("core-impl", "serde", "1", "normal"),
+        ("shared", "log", "0.4", "normal"),
+    ]
+    assert scan.opaque == [
+        "Cargo.toml: up: a path dependency outside the repository",
+        "Cargo.toml: gone: a path dependency unreadable",
+    ]
 
 
 # The pin loop, against a small model of cargo's resolver
@@ -178,13 +220,21 @@ class FakeCargo:
         return self.render()
 
     def _allowed(self, name: str, old: str, new: str) -> bool:
-        asks = [r for m, reqs in self.members.items() for n, r in reqs if n == name]
+        """Every edge that points at ``name old`` must accept ``new``, each against the
+        one requirement it was resolved from (like cargo, not against every requirement
+        the dependent has on that crate)."""
+        edge = (name, old)
+        asks = [
+            r
+            for m, reqs in self.members.items()
+            for (_, r), e in zip(reqs, self.roots[m], strict=True)
+            if e == edge
+        ]
         asks += [
             r
             for (dep, vers), edges in self.packages.items()
-            if (name, old) in edges
-            for n, r in self._entry(dep, vers)
-            if n == name
+            for (_, r), e in zip(self._entry(dep, vers), edges, strict=True)
+            if e == edge
         ]
         return all(VersionReq.parse(r).matches(Version.parse(new)) for r in asks)
 
@@ -256,7 +306,94 @@ def test_pin_loop_retries_with_the_next_version_when_cargo_refuses() -> None:
     assert _versions(result.lockfile)["windows-sys"] == ["0.48.0"]
     assert result.bounded
     assert "          home 0.5.12 -> 0.5.9 (FAILED: error: failed to select 0.5.9)" in lines
-    assert all(p.to_version != "0.5.9" for p in result.pins())
+    # Regression: the retried pin has the same spec as the refused one and was dropped.
+    homes = [(p.from_version, p.to_version) for p in result.pins() if p.name == "home"]
+    assert homes == [("0.5.12", "0.5.5")]
+    assert len(result.pins()) == sum(len(r.pins) - len(r.failed) for r in result.rounds)
+
+
+def test_pin_loop_keeps_each_edge_to_its_own_requirement() -> None:
+    # Regression: a renamed second version of the same crate put both requirements on
+    # every edge, so no version matched "0.1 and 1.6" and either 1.18.0 stayed late.
+    members = {"demo": [("either", "0.1"), ("either", "1.6")]}
+    reqs = [
+        Requirement("demo", "either", "0.1", "normal"),
+        Requirement("demo", "either", "1.6", "normal"),
+    ]
+    lines: list[str] = []
+    result = bound_lockfile(
+        FakeCargo(INDEX, members), INDEX, when("2024-03-01T00:00:00"), reqs, lines.append
+    )
+    assert result.bounded, result.unbounded
+    (pin,) = result.pins()
+    assert (pin.name, pin.from_version, pin.to_version) == ("either", "1.18.0", "1.10.0")
+    assert pin.reason.endswith("matches 1.6 (demo)")
+    assert sorted(_versions(result.lockfile)["either"]) == ["0.1.7", "1.10.0"]
+
+
+def _index_line(name: str, vers: str, pubtime: str, deps: list[dict[str, object]]) -> str:
+    entry = {"name": name, "vers": vers, "deps": deps, "yanked": False, "pubtime": pubtime}
+    return json.dumps(entry) + "\n"
+
+
+def test_pin_loop_ignores_the_other_alias_of_a_registry_dependent(tmp_path: Path) -> None:
+    # Regression: two optional aliases of different glam versions on one crates.io
+    # dependent were combined into "^0.13 and ^0.24", so glam 0.24.9 was reported as
+    # unbounded although only the ^0.24 alias has an edge in the lockfile.
+    aliases = [
+        {"name": n, "package": "glam", "req": r, "kind": "normal", "optional": True}
+        for n, r in (("glam013", "^0.13"), ("glam024", "^0.24"))
+    ]
+    (tmp_path / "ma" / "th").mkdir(parents=True)
+    (tmp_path / "ma" / "th" / "mathlib").write_text(
+        _index_line("mathlib", "1.0.0", "2023-01-05T00:00:00Z", aliases)
+    )
+    (tmp_path / "gl" / "am").mkdir(parents=True)
+    (tmp_path / "gl" / "am" / "glam").write_text(
+        _index_line("glam", "0.13.1", "2021-03-01T00:00:00Z", [])
+        + _index_line("glam", "0.24.2", "2023-09-23T00:00:00Z", [])
+        + _index_line("glam", "0.24.9", "2024-06-10T00:00:00Z", [])
+    )
+    index = DirectoryIndex(tmp_path)
+
+    def lock(glam: str) -> str:
+        return (
+            'version = 3\n[[package]]\nname = "demo"\nversion = "0.1.0"\n'
+            'dependencies = ["mathlib"]\n'
+            f'[[package]]\nname = "mathlib"\nversion = "1.0.0"\nsource = "{REGISTRY}"\n'
+            'dependencies = ["glam"]\n'
+            f'[[package]]\nname = "glam"\nversion = "{glam}"\nsource = "{REGISTRY}"\n'
+        )
+
+    class Moves:
+        def generate(self) -> str:
+            return lock("0.24.9")
+
+        def pin(self, pins: list[Pin]) -> tuple[str, dict[str, str]]:
+            (only,) = pins
+            return lock(only.to_version), {}
+
+    reqs = [Requirement("demo", "mathlib", "1", "normal")]
+    result = bound_lockfile(Moves(), index, when("2024-03-01T00:00:00"), reqs, print)
+    assert result.bounded, result.unbounded
+    (pin,) = result.pins()
+    assert (pin.from_version, pin.to_version) == ("0.24.9", "0.24.2")
+    assert pin.reason.endswith("matches ^0.24 (mathlib 1.0.0)")
+
+
+@pytest.mark.parametrize(
+    ("texts", "locked", "kept"),
+    [
+        (["0.1", "1.6"], "1.18.0", ["1.6"]),
+        (["0.1", "1.6"], "0.1.7", ["0.1"]),
+        ([">=1", "1.2"], "1.9.0", [">=1", "1.2"]),
+        (["latest", "1.6"], "1.9.0", ["latest", "1.6"]),
+        (["0.1", "0.2"], "1.0.0", ["0.1", "0.2"]),  # none satisfied: keep them all
+        (["0.1"], "not-a-version", ["0.1"]),
+    ],
+)
+def test_edge_requirements(texts: list[str], locked: str, kept: list[str]) -> None:
+    assert edge_requirements(texts, locked) == kept
 
 
 def test_pin_loop_reports_entries_that_cannot_be_bounded() -> None:

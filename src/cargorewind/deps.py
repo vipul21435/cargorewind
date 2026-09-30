@@ -24,7 +24,7 @@ import re
 import shlex
 import tomllib
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -32,7 +32,7 @@ from cargorewind.backend import Session
 from cargorewind.crateindex import CrateIndex, CrateIndexError, IndexVersion, candidates
 from cargorewind.layout import SourceTree
 from cargorewind.lockfile import LockedPackage, Lockfile, parse_lockfile
-from cargorewind.semver import SemverError, VersionReq
+from cargorewind.semver import SemverError, Version, VersionReq
 from cargorewind.toolchain import workspace_manifests
 
 Log = Callable[[str], None]
@@ -83,26 +83,70 @@ def _dependency_tables(data: dict[str, Any]) -> Iterator[tuple[str, str | None, 
                     yield kind, str(cfg), table
 
 
-def _entry(key: str, value: Any, inherited: dict[str, Any]) -> tuple[str, str] | str | None:
-    """(crate name, requirement) of a crates.io dependency, a reason to skip it, or None."""
+@dataclass(frozen=True)
+class _Registry:
+    name: str  # the crate's name on crates.io
+    req: str
+
+
+@dataclass(frozen=True)
+class _Local:
+    path: str  # the dependency's directory, relative to ``base``
+    base: str  # directory the path is relative to (the workspace root when inherited)
+
+
+@dataclass(frozen=True)
+class _Opaque:
+    reason: str  # a git dependency: its crates.io dependencies show only in a lockfile
+
+
+def _inherit(
+    key: str, value: dict[str, Any], inherited: dict[str, Any], folder: str
+) -> tuple[dict[str, Any], str] | str:
+    """The entry after ``workspace = true`` and the directory its path is relative to,
+    or a reason to skip it."""
+    if value.get("workspace") is not True:
+        return value, folder
+    base = inherited.get(key)
+    if base is None:
+        return f"{key}: workspace = true, but [workspace.dependencies] has no {key}"
+    # Paths in [workspace.dependencies] are relative to the workspace root.
+    return ({"version": base} if isinstance(base, str) else {**base, **value}), ""
+
+
+def _entry(
+    key: str, value: Any, inherited: dict[str, Any], folder: str
+) -> _Registry | _Local | _Opaque | str | None:
+    """What a dependency entry is: a crates.io requirement, a path dependency, a git
+    dependency, a reason to skip it (a string), or None when it is not a dependency."""
     if isinstance(value, str):
-        return key, value
+        value = {"version": value}
     if not isinstance(value, dict):
         return None
-    if value.get("workspace") is True:
-        base = inherited.get(key)
-        if base is None:
-            return f"{key}: workspace = true, but [workspace.dependencies] has no {key}"
-        value = {"version": base} if isinstance(base, str) else {**base, **value}
-    if "path" in value or "git" in value:
-        return None  # a local or git dependency: not on crates.io
+    resolved = _inherit(key, value, inherited, folder)
+    if isinstance(resolved, str):
+        return resolved
+    value, folder = resolved
+    if "path" in value:
+        path = value["path"]
+        return _Local(path, folder) if isinstance(path, str) else None
+    if "git" in value:
+        return _Opaque(f"{key}: a git dependency; cargo resolves its dependencies")
     if "registry" in value or "registry-index" in value:
         return f"{key}: an alternate registry, not bounded by date"
-    package = value.get("package")
-    version = value.get("version")
-    return (package if isinstance(package, str) else key), (
-        version if isinstance(version, str) else "*"
-    )
+    package, version = value.get("package"), value.get("version")
+    name = package if isinstance(package, str) else key
+    return _Registry(name, version if isinstance(version, str) else "*")
+
+
+def _local_manifest(base: str, path: str) -> str | None:
+    """Repository path of a path dependency's Cargo.toml, None when it leaves the tree."""
+    if posixpath.isabs(path):
+        return None
+    folder = posixpath.normpath(posixpath.join(base, path))
+    if folder == ".." or folder.startswith("../"):
+        return None
+    return "Cargo.toml" if folder == "." else f"{folder}/Cargo.toml"
 
 
 def _load(tree: SourceTree, path: str) -> dict[str, Any] | None:
@@ -115,40 +159,85 @@ def _load(tree: SourceTree, path: str) -> dict[str, Any] | None:
         return None
 
 
-def manifest_requirements(tree: SourceTree) -> tuple[list[Requirement], list[str]]:
-    """crates.io requirements of the root package and every root workspace member,
-    plus notes about dependencies that cannot be bounded."""
+@dataclass
+class ManifestScan:
+    """crates.io requirements the manifests declare, and what they cannot show."""
+
+    requirements: list[Requirement] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # Dependencies whose own crates.io dependencies only a generated lockfile shows (git
+    # dependencies, path dependencies outside the tree or without a readable manifest).
+    opaque: list[str] = field(default_factory=list)
+
+    @property
+    def needs_bounding(self) -> bool:
+        return bool(self.requirements or self.opaque)
+
+
+class _ManifestWalk:
+    """Reads the root, the members and every path dependency they reach, once each."""
+
+    def __init__(self, tree: SourceTree, root: dict[str, Any]) -> None:
+        self.tree = tree
+        workspace = root.get("workspace")
+        self.inherited: dict[str, Any] = {}
+        if isinstance(workspace, dict) and isinstance(workspace.get("dependencies"), dict):
+            self.inherited = workspace["dependencies"]
+        self.queue = [("Cargo.toml", root)]
+        for path in workspace_manifests(tree, root):
+            data = _load(tree, path)
+            if data is not None:
+                self.queue.append((path, data))
+        self.seen = {path for path, _ in self.queue}
+        self.scan = ManifestScan()
+
+    def run(self) -> ManifestScan:
+        for path, data in self.queue:  # grows while path dependencies are found
+            package = data.get("package")
+            if not isinstance(package, dict):
+                continue
+            member = package.get("name")
+            folder = posixpath.dirname(path)
+            member_name = member if isinstance(member, str) else folder or "."
+            for kind, target, table in _dependency_tables(data):
+                for key, value in table.items():
+                    where = Requirement(member_name, key, "", kind, target)
+                    self._add(path, where, value)
+        self.scan.notes.extend(self.scan.opaque)
+        return self.scan
+
+    def _add(self, path: str, where: Requirement, value: Any) -> None:
+        """Record one dependency entry; ``where`` carries its member, key, kind, target."""
+        key = where.name
+        entry = _entry(key, value, self.inherited, posixpath.dirname(path))
+        if isinstance(entry, str):
+            self.scan.notes.append(f"{path}: {entry}")
+        elif isinstance(entry, _Opaque):
+            self.scan.opaque.append(f"{path}: {entry.reason}")
+        elif isinstance(entry, _Local):
+            manifest = _local_manifest(entry.base, entry.path)
+            local = _load(self.tree, manifest) if manifest is not None else None
+            if manifest is None or local is None:
+                why = "outside the repository" if manifest is None else "unreadable"
+                self.scan.opaque.append(f"{path}: {key}: a path dependency {why}")
+            elif manifest not in self.seen:
+                self.seen.add(manifest)
+                self.queue.append((manifest, local))
+        elif entry is not None:
+            optional = isinstance(value, dict) and value.get("optional") is True
+            self.scan.requirements.append(
+                replace(where, name=entry.name, req=entry.req, optional=optional)
+            )
+
+
+def manifest_requirements(tree: SourceTree) -> ManifestScan:
+    """crates.io requirements of the root package, every root workspace member and every
+    path dependency they reach (cargo makes those workspace members too), plus notes
+    about dependencies that cannot be bounded."""
     root = _load(tree, "Cargo.toml")
     if root is None:
-        return [], ["no readable Cargo.toml at the root"]
-    workspace = root.get("workspace")
-    inherited: dict[str, Any] = {}
-    if isinstance(workspace, dict) and isinstance(workspace.get("dependencies"), dict):
-        inherited = workspace["dependencies"]
-    manifests = [("Cargo.toml", root)]
-    for path in workspace_manifests(tree, root):
-        data = _load(tree, path)
-        if data is not None:
-            manifests.append((path, data))
-    found: list[Requirement] = []
-    notes: list[str] = []
-    for path, data in manifests:
-        package = data.get("package")
-        if not isinstance(package, dict):
-            continue
-        member = package.get("name")
-        member_name = member if isinstance(member, str) else posixpath.dirname(path) or "."
-        for kind, target, table in _dependency_tables(data):
-            for key, value in table.items():
-                entry = _entry(key, value, inherited)
-                if isinstance(entry, str):
-                    notes.append(f"{path}: {entry}")
-                elif entry is not None:
-                    optional = isinstance(value, dict) and value.get("optional") is True
-                    found.append(
-                        Requirement(member_name, entry[0], entry[1], kind, target, optional)
-                    )
-    return found, notes
+        return ManifestScan(notes=["no readable Cargo.toml at the root"])
+    return _ManifestWalk(tree, root).run()
 
 
 # The pin loop
@@ -197,8 +286,9 @@ class BoundLock:
         return not self.unbounded
 
     def pins(self) -> list[Pin]:
-        failed = {spec for r in self.rounds for spec in r.failed}
-        return [p for r in self.rounds for p in r.pins if p.spec not in failed]
+        """The pins cargo accepted. A refused pin is retried in a later round with the
+        same spec, so failures only count within their own round."""
+        return [p for r in self.rounds for p in r.pins if p.spec not in r.failed]
 
 
 class LockDriver(Protocol):
@@ -207,6 +297,28 @@ class LockDriver(Protocol):
     def generate(self) -> str: ...
 
     def pin(self, pins: list[Pin]) -> tuple[str, dict[str, str]]: ...
+
+
+def edge_requirements(texts: list[str], locked: str) -> list[str]:
+    """The requirements of one dependent that the locked version satisfies, plus the
+    ones that do not parse (the planner notes those). When none is satisfied (the
+    lockfile and the manifests disagree), every requirement is kept."""
+    try:
+        version = Version.parse(locked)
+    except SemverError:
+        return texts
+    kept: list[str] = []
+    satisfied = False
+    for text in texts:
+        try:
+            matches = VersionReq.parse(text).matches(version)
+        except SemverError:
+            kept.append(text)
+            continue
+        if matches:
+            kept.append(text)
+            satisfied = True
+    return kept if satisfied else texts
 
 
 def _stamp(when: datetime | None) -> str:
@@ -245,17 +357,27 @@ class _Planner:
         return entry is None or entry.pubtime is None or entry.pubtime >= self.cutoff
 
     def reqs_on(self, lock: Lockfile, package: LockedPackage) -> list[tuple[str, str]]:
-        """(requirement, who asks) for every lockfile edge that points at ``package``."""
+        """(requirement, who asks) for every lockfile edge that points at ``package``.
+
+        A dependent can ask for one crate several times: a renamed second version
+        (``either01 = { package = "either", version = "0.1" }`` next to ``either = "1"``),
+        optional aliases of different versions, per-target tables. cargo resolved the
+        edge against the requirements the locked version satisfies, so only those count.
+        """
         found: list[tuple[str, str]] = []
         for dependent in lock.dependents(package):
             if dependent.source is None:
-                found += [
-                    (r.req, dependent.name)
+                texts = [
+                    r.req
                     for r in self.requirements
                     if r.member == dependent.name and r.name == package.name
                 ]
+                who = dependent.name
             elif dependent.from_crates_io and (entry := self.entry(dependent)) is not None:
-                found += [(req, str(dependent)) for req in entry.requirement_on(package.name)]
+                texts, who = entry.requirement_on(package.name), str(dependent)
+            else:
+                continue
+            found += [(text, who) for text in edge_requirements(texts, package.version)]
         return found
 
     def plan(self, lock: Lockfile, package: LockedPackage) -> Pin | Unbounded:
