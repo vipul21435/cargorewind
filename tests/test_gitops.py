@@ -202,3 +202,47 @@ def test_grep_words_finds_whole_words_in_matching_files(
     assert git.grep_words(rev, [], "*.rs") == {}
     with pytest.raises(CommandError):
         git.grep_words("0" * 40, ["alpha"], "*.rs")
+
+
+GIT_CONFIG = {
+    "grep.lineNumber": "true",
+    "grep.column": "true",
+    "color.ui": "always",
+    "color.grep": "always",
+}
+
+
+def test_grep_words_ignores_the_user_git_configuration(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression: grep.lineNumber, grep.column and color settings changed the output
+    # format, so every word looked absent at base and the image build's probe failed.
+    origin = make_repo("origin")
+    files = {"src/a.rs": "fn alpha() { beta(); }\n", "src/b.rs": "// beta\nlet alphabet = 1;\n"}
+    rev = origin.commit("base", files, "2024-01-10T12:00:00+00:00")
+    git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(GIT_CONFIG)))
+    for n, (key, value) in enumerate(GIT_CONFIG.items()):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{n}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{n}", value)
+    found = git.grep_words(rev, ["alpha", "beta", "gamma"], "*.rs")
+    assert found == {"alpha": ["src/a.rs"], "beta": ["src/a.rs", "src/b.rs"]}
+
+
+def test_grep_words_takes_tens_of_thousands_of_words(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    # Regression: every word was a "-e word" argument, so a large generated fix hit
+    # the argument length limit (OSError: Argument list too long).
+    origin = make_repo("origin")
+    rev = origin.commit(
+        "base",
+        {"src/a.rs": "pub const GENERATED_ENTRY_NUMBER_7: u32 = 7;\nfn alpha() {}\n"},
+        "2024-01-10T12:00:00+00:00",
+    )
+    git = open_checkout(SubprocessRunner(), str(origin.path), tmp_path / "work")
+    words = [f"GENERATED_ENTRY_NUMBER_{n:05d}_LONG_NAME" for n in range(40_000)]
+    words += ["GENERATED_ENTRY_NUMBER_7", "alpha"]
+    assert sum(len(w) + 4 for w in words) > 1_048_576  # larger than ARG_MAX on macOS
+    found = git.grep_words(rev, words, "*.rs")
+    assert found == {"GENERATED_ENTRY_NUMBER_7": ["src/a.rs"], "alpha": ["src/a.rs"]}

@@ -27,5 +27,6 @@
     "test",
     "--no-fail-fast"
   ],
-  "hash": "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f"
+  "dockerfile_sha256": "34b693672a1670eb8970bba2aeaa3549ed2508464efdf37cccb5f91619f3c2cf",
+  "hash": "edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a"
 }

@@ -19,5 +19,6 @@ COPY --chown=rewind:rewind repo/ ./
 RUN cargo fetch --locked
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run
-# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
-LABEL cargorewind.recipe=b01fe4ae776fae912adfaae4b321cdddd81e9a4167aefbf25bef655297fd0432
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json) and of the lines
+# above; the build cache key.
+LABEL cargorewind.recipe=8240c2ee2c3812cf87ce05e6a40976cc039dabe1988fe02d8e6b057c318b8b0e

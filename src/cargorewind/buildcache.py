@@ -23,7 +23,7 @@ import json
 import os
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -31,7 +31,7 @@ from typing import Any
 
 from cargorewind.backend import Backend, BuildResult
 from cargorewind.dockerfile import PROJECT_LABEL, RECIPE_LABEL
-from cargorewind.runner import Runner, checked
+from cargorewind.runner import CommandError, Runner, checked
 
 INDEX_FILE = "build-index.json"
 INDEX_LOCK = "build-index.lock"
@@ -115,10 +115,25 @@ class CacheEntry:
 
     @classmethod
     def from_dict(cls, data: Any) -> CacheEntry | None:
-        try:
-            return cls(**data)
-        except TypeError:
+        """The entry ``data`` describes, or None when a field is missing or mistyped.
+
+        The index is data other cargorewind versions (or a stray editor) may have
+        written, so a wrong type is as unusable as a missing key: ``build_seconds`` must
+        be a number and every other field a string, or the entry is ignored.
+        """
+        if not isinstance(data, dict):
             return None
+        values: dict[str, Any] = {}
+        for spec in fields(cls):
+            value = data.get(spec.name)
+            if spec.name == "build_seconds":
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    return None
+                value = float(value)
+            elif not isinstance(value, str):
+                return None
+            values[spec.name] = value
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -234,6 +249,17 @@ class BuildCache:
         result = checked(self.runner.run([*argv, "--filter", "dangling=true"]))
         return result.stdout.strip()
 
+    def _prune_after_rebuild(self) -> str:
+        """The prune's last output line, or why it failed: a cleanup step that fails (for
+        example Docker's "a prune operation is already running") must not fail a run
+        whose image is built and indexed."""
+        try:
+            pruned = self.prune_dangling()
+        except CommandError as exc:
+            detail = str(exc).splitlines()[-1] if str(exc) else "no detail"
+            return f"dangling images not pruned ({detail})"
+        return pruned.splitlines()[-1] if pruned else ""
+
     # Lookup and build
 
     def lookup(self, tag: str, recipe: str) -> CachedBuild | None:
@@ -323,10 +349,8 @@ class BuildCache:
         )
         written = self._put(entry)
         reason = "--rebuild: built with --no-cache" if rebuild else "no image for this recipe"
-        if rebuild:
-            pruned = self.prune_dangling()
-            if pruned:
-                reason += f"; {pruned.splitlines()[-1]}"
+        if rebuild and (pruned := self._prune_after_rebuild()):
+            reason += f"; {pruned}"
         if not written:
             reason += f"; {self.note}"
         return CachedBuild(result, request.tag, False, f"{reason}; built in {seconds:g} s")

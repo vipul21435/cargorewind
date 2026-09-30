@@ -82,6 +82,26 @@ def test_definitions_find_items_and_skip_comments_strings_and_generics() -> None
     assert [(d.kind, d.name) for d in definitions(tricky)] == [("fn", "g"), ("fn", "h")]
 
 
+def test_a_raw_pointer_to_a_path_is_not_a_const_definition() -> None:
+    # Regression: "::" is two ":" tokens, so "*const std::ffi::c_void" was read as a
+    # definition of const std, and probes.json claimed consts that do not exist.
+    pointers = (
+        "fn f(p: *const std::ffi::c_void) {}\n"
+        "pub fn c_len(p: *const libc::c_char) -> usize { 0 }\n"
+        "fn g(p: *const Self::Item, q: *mut *const T) {}\n"
+        "const LIMIT: usize = 3;\n"
+        "impl X { pub const ZERO: Self = X(0); }\n"
+    )
+    found = [(d.kind, d.name) for d in definitions(pointers)]
+    assert found == [
+        ("fn", "f"),
+        ("fn", "c_len"),
+        ("fn", "g"),
+        ("const", "LIMIT"),
+        ("const", "ZERO"),
+    ]
+
+
 def test_added_lines_follow_the_new_side_numbering() -> None:
     (lib,) = _patch("lib.fix.patch")
     assert added_lines(lib) == {1, 2, 3, 4, 6, 7}

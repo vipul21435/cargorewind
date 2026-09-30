@@ -60,8 +60,10 @@ def definitions(source: str) -> list[Definition]:
     """Item definitions of the probe kinds in Rust ``source``, with their lines.
 
     ``const`` counts only as ``const NAME:`` outside generic parameter lists (so neither
-    ``const fn`` nor ``<const N: usize>`` nor ``*const T``). Raw identifiers, ``_`` and
-    non-ASCII names are left out, because a word search cannot match them reliably.
+    ``const fn`` nor ``<const N: usize>`` nor ``*const T``). The lexer emits ``::`` as two
+    ``:`` tokens, so a raw pointer to a path (``*const std::ffi::c_void``) is told apart
+    by the ``*`` before it and by the second ``:``. Raw identifiers, ``_`` and non-ASCII
+    names are left out, because a word search cannot match them reliably.
     """
     tokens = tokenize(source)
     found: list[Definition] = []
@@ -80,7 +82,9 @@ def definitions(source: str) -> list[Definition]:
             add(tok.text, nxt)
         elif tok.text == "const":
             generic = prev is not None and prev.is_punct("<,")
-            if not generic and after is not None and after.is_punct(":"):
+            pointer = prev is not None and prev.is_punct("*")
+            path = (third := _token(tokens, i + 3)) is not None and third.is_punct(":")
+            if not (generic or pointer or path) and after is not None and after.is_punct(":"):
                 add("const", nxt)
         elif tok.text == "macro_rules" and nxt is not None and nxt.is_punct("!"):
             add("macro_rules", after)

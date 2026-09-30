@@ -389,6 +389,26 @@ green, pushed, and the README describes it with real output.
 - `task.json` keeps schema 1 and gains `runs.<stage>.state`, `reruns`, `tests` (target,
   rerun command, status per stage, rerun outcomes for every test seen) and `flaky`.
 
+### Decisions made while fixing the slice 4 and 5 review findings (2026-09-30)
+
+- The base-commit word search reads its words from a pattern file (`git grep -f`), so
+  a generated fix with tens of thousands of new names never exceeds the argument
+  length limit, and it fixes its output format on the command line (`-c
+  grep.lineNumber=false -c grep.column=false -c color.grep=never`, `--no-color`), so
+  a user's git configuration cannot turn every name into "absent at base".
+- The recipe hash now covers the Dockerfile body (every line but the label) after the
+  canonical JSON, and `recipe.json` records the body's own sha256. A template change
+  in a newer cargorewind is a new recipe, so a cached image built from the old
+  template is never reused and the exported Dockerfile always describes the image
+  the runs used. The strsim-rs transcript was re-recorded live (the label changed).
+- Build index entries are checked field by field (`build_seconds` a number, the rest
+  strings); a mistyped entry is ignored like a missing one, and the image is found
+  again through its label. The prune after `--rebuild` is best effort: a failure
+  (Docker refuses concurrent prunes) goes into the build reason, not the exit code.
+- `const NAME` is a definition only when the name is not followed by `::` and `const`
+  is not preceded by `*`, so a raw pointer to a path (`*const std::ffi::c_void`) no
+  longer becomes a bogus `const std`.
+
 ## Core (deliverable)
 
 - [x] Core: the smallest end-to-end rewind of one fix commit.

@@ -28,5 +28,6 @@ RUN mkdir -p /home/rewind/.cargo \
 ENV CARGO_NET_OFFLINE=true
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run --offline
-# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
-LABEL cargorewind.recipe=9e555253e077f1fc31a60f2d65eee926d5c6ee2e03032ff759e62663dabe7644
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json) and of the lines
+# above; the build cache key.
+LABEL cargorewind.recipe=dadcac438dc99cb93b2892872ca820e93bc3d8beda0956d835748ec294bb75d6

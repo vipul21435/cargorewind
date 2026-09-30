@@ -176,6 +176,22 @@ def test_cache_list_and_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     (cache_dir / "build-index.json").write_text("{broken")
     noted = runner.invoke(cli.app, ["cache", "list", "--cache-dir", str(cache_dir)])
     assert "note      unreadable build index" in noted.stdout
+    # Regression: an entry with null built_at and build_seconds crashed the listing.
+    entry = {
+        "recipe": live,
+        "tag": f"cargorewind/x:{live[:16]}",
+        "image_id": "sha256:x",
+        "built_at": None,
+        "build_seconds": None,
+        "repo": "x",
+        "base_commit": "c" * 40,
+        "toolchain": "1.70.0",
+    }
+    index = {"schema_version": 1, "images": {live: entry}}
+    (cache_dir / "build-index.json").write_text(json.dumps(index))
+    mistyped = runner.invoke(cli.app, ["cache", "list", "--cache-dir", str(cache_dir)])
+    assert mistyped.exit_code == 0, mistyped.output
+    assert "(0 image(s))" in mistyped.stdout
 
     class DockerDown(FakeDocker):
         def run(self, argv: Any, **kwargs: Any) -> CommandResult:

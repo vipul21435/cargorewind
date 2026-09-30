@@ -16,7 +16,7 @@ from cargorewind.buildcache import (
     BuildRequest,
     FileLock,
 )
-from cargorewind.runner import CommandResult
+from cargorewind.runner import CommandError, CommandResult
 from tests.conftest import FakeRunner
 
 RECIPE = "a" * 64
@@ -259,6 +259,88 @@ def test_bad_index_files_count_as_empty(tmp_path: Path, content: str, note: str)
     cache = BuildCache(tmp_path, FakeDocker())
     assert cache.entries() == {}
     assert note in cache.note
+
+
+def _index(**entry: object) -> str:
+    fields: dict[str, object] = {
+        "recipe": RECIPE,
+        "tag": TAG,
+        "image_id": "sha256:x",
+        "built_at": "2026-09-30T12:00:00+00:00",
+        "build_seconds": 12.5,
+        "repo": "r",
+        "base_commit": "c",
+        "toolchain": "1.70.0",
+        **entry,
+    }
+    return json.dumps({"schema_version": 1, "images": {RECIPE: fields}})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"build_seconds": None},
+        {"build_seconds": "12.5"},
+        {"build_seconds": True},
+        {"built_at": None},
+        {"tag": ["t"]},
+        {"image_id": 7},
+    ],
+)
+def test_mistyped_index_entries_are_ignored(tmp_path: Path, entry: dict[str, object]) -> None:
+    # Regression: only missing keys were rejected, so a null build_seconds crashed the
+    # cache hit message (and `cache list`) with a TypeError on every run of that recipe.
+    (tmp_path / INDEX_FILE).write_text(_index(**entry))
+    docker = FakeDocker()
+    docker.images[TAG] = ("sha256:x", RECIPE)
+    cache = BuildCache(tmp_path, docker, now=lambda: NOW)
+    assert cache.entries() == {}
+    hit = cache.build(FakeBuilder(docker), tmp_path, _request())
+    assert hit.hit and hit.reason == f"image {TAG} found in Docker and indexed again"
+    assert cache.entries()[RECIPE].build_seconds == 0.0
+
+
+def test_integer_build_seconds_are_read_as_floats(tmp_path: Path) -> None:
+    (tmp_path / INDEX_FILE).write_text(_index(build_seconds=3))
+    entry = BuildCache(tmp_path, FakeDocker()).entries()[RECIPE]
+    assert entry.build_seconds == 3.0 and isinstance(entry.build_seconds, float)
+
+
+class PruneRefusingDocker(FakeDocker):
+    """Docker while another prune runs: `docker image prune` exits 1."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        stdin: bytes | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        if tuple(argv)[:3] == ("docker", "image", "prune"):
+            self.calls.append(tuple(argv))
+            error = "Error response from daemon: a prune operation is already running\n"
+            return CommandResult(tuple(argv), 1, "", error)
+        return super().run(argv, cwd=cwd, stdin=stdin, env=env, timeout=timeout)
+
+
+def test_a_failed_prune_after_rebuild_does_not_fail_the_build(tmp_path: Path) -> None:
+    # Regression: the best-effort prune raised CommandError out of build(), so rewind
+    # exited 1 after --rebuild although the image was built and indexed.
+    docker = PruneRefusingDocker()
+    builder = FakeBuilder(docker)
+    cache = _cache(tmp_path, docker)
+    built = cache.build(builder, tmp_path, _request(), rebuild=True)
+    assert builder.calls == [(TAG, True)]
+    assert not built.hit and built.result.image_id == "sha256:img1"
+    assert built.reason.startswith(
+        "--rebuild: built with --no-cache; dangling images not pruned "
+        "(Error response from daemon: a prune operation is already running)"
+    )
+    assert cache.entries()[RECIPE].image_id == "sha256:img1"
+    with pytest.raises(CommandError):  # `cache prune` itself still reports the failure
+        cache.prune()
 
 
 def test_prune_drops_entries_whose_image_is_gone(tmp_path: Path) -> None:

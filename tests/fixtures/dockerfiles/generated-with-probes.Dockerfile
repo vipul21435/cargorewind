@@ -22,5 +22,6 @@ RUN grep -rlwF --include='*.rs' \
 RUN cargo generate-lockfile
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run
-# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
-LABEL cargorewind.recipe=d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json) and of the lines
+# above; the build cache key.
+LABEL cargorewind.recipe=edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a

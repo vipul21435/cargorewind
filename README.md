@@ -143,9 +143,12 @@ run.
   a pure function of it, and five golden Dockerfiles pin every byte. Every field that
   reaches a Dockerfile line is checked with `fullmatch` when the recipe is created, so
   no value can carry a newline or shell syntax into the file. The recipe hash is the
-  sha256 of its canonical JSON (sorted keys, no whitespace, ASCII), written to
-  `recipe.json`; it is the image tag (`cargorewind/<repo>:<first 16 hex digits>`), the
-  `cargorewind.recipe` label and the build cache key. The file has a pinned base,
+  sha256 of its canonical JSON (sorted keys, no whitespace, ASCII) followed by the
+  Dockerfile body it renders (every line but the label), so a template change in a
+  newer cargorewind is a new recipe and never reuses an image built from the old
+  template. It is written to `recipe.json` (with the body's own sha256) and is the
+  image tag (`cargorewind/<repo>:<first 16 hex digits>`), the `cargorewind.recipe`
+  label and the build cache key. The file has a pinned base,
   non-root user, `LABEL project=cargorewind`, `CARGO_BUILD_JOBS=2`, one of the three
   dependency strategies above and a warm `cargo test --no-run`. A date-bounded lockfile
   adds a `toolchain` stage: it is rendered on its own for the pin loop, and the final
@@ -316,8 +319,8 @@ lockfile  none, and no crates.io dependencies: cargo generates it in the image
 probe     test fn jaro_same_one_character (src/lib.rs:495): absent at base, defined before and after
 probe     test fn jaro_winkler_same_one_character (src/lib.rs:570): absent at base, defined before and after
 probe     2 identifier(s), every host check passed; the image build and the before and after runs grep their checkouts too
-recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
-build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache off: no build cache (replay, record or --no-build-cache))
+recipe    edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a
+build     cargorewind/strsim-rs:edcbd61bae401cff (cache off: no build cache (replay, record or --no-build-cache))
 run       base   exit   0  102 passed, 0 failed, 0 ignored
 run       before exit 101  102 passed, 2 failed, 0 ignored
 run       after  exit   0  104 passed, 0 failed, 0 ignored
@@ -359,9 +362,9 @@ exported `out/demo/task.json`:
   "lock_report": "lock.json",
   "vendored": false,
   "test_command": "cargo test --no-fail-fast",
-  "recipe": {"hash": "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f",
+  "recipe": {"hash": "edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a",
              "report": "recipe.json"},
-  "image_tag": "cargorewind/strsim-rs:d56b85f51c7a8dc2",
+  "image_tag": "cargorewind/strsim-rs:edcbd61bae401cff",
   "build_cache": {"status": "off", "reason": "no build cache (replay, record or --no-build-cache)"},
   "probes": {"identifiers": [{"kind": "fn", "name": "jaro_same_one_character",
                               "patch": "test", "path": "src/lib.rs", "line": 495}, "..."],
@@ -424,8 +427,9 @@ RUN grep -rlwF --include='*.rs' \
 RUN cargo generate-lockfile
 # Warm build: compile dependencies and every test target once at base.
 RUN cargo test --no-run
-# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.
-LABEL cargorewind.recipe=d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
+# Recipe hash: sha256 of the canonical recipe JSON (recipe.json) and of the lines
+# above; the build cache key.
+LABEL cargorewind.recipe=edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a
 ```
 
 ### Sanity probes and the build cache
@@ -451,7 +455,7 @@ The stage script of the before run, started on the plain base image without the
 test patch (so `jaro_same_one_character` is missing), exits before cargo runs:
 
 ```text
-$ docker run --rm --network none cargorewind/strsim-rs:d56b85f51c7a8dc2 sh -c "cd /home/rewind/repo && for w in jaro_same_one_character; do grep -rqwF --include='*.rs' -e \"\$w\" . || { echo \"cargorewind probe failed: \$w is missing\"; exit 97; }; done && exec cargo test --no-fail-fast 2>&1"
+$ docker run --rm --network none cargorewind/strsim-rs:edcbd61bae401cff sh -c "cd /home/rewind/repo && for w in jaro_same_one_character; do grep -rqwF --include='*.rs' -e \"\$w\" . || { echo \"cargorewind probe failed: \$w is missing\"; exit 97; }; done && exec cargo test --no-fail-fast 2>&1"
 cargorewind probe failed: jaro_same_one_character is missing
 $ echo $?
 97
@@ -463,16 +467,16 @@ second finds the labelled image:
 
 ```text
 $ cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/cache-demo-1 --cache-dir <dir> --rebuild
-recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
-build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache miss: --rebuild: built with --no-cache; Total reclaimed space: 0B; built in 2.4 s)
+recipe    edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a
+build     cargorewind/strsim-rs:edcbd61bae401cff (cache miss: --rebuild: built with --no-cache; Total reclaimed space: 0B; built in 2.4 s)
 verdict       VERIFIED fail-to-pass flip
 $ cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --out out/cache-demo-2 --cache-dir <dir>
-recipe    d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f
-build     cargorewind/strsim-rs:d56b85f51c7a8dc2 (cache hit: image cargorewind/strsim-rs:d56b85f51c7a8dc2 built 2026-09-30T00:19:54+00:00 in 2.4 s)
+recipe    edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a
+build     cargorewind/strsim-rs:edcbd61bae401cff (cache hit: image cargorewind/strsim-rs:edcbd61bae401cff built 2026-09-30T00:19:54+00:00 in 2.4 s)
 verdict       VERIFIED fail-to-pass flip
 $ cargorewind cache list --cache-dir <dir>
 index     <dir>/build-index.json (1 image(s))
-d56b85f51c7a8dc2  cargorewind/strsim-rs:d56b85f51c7a8dc2  built 2026-09-30T00:19:54+00:00 in 2.4 s  1.39.0  base c4cdd9c35dfa
+edcbd61bae401cff  cargorewind/strsim-rs:edcbd61bae401cff  built 2026-09-30T00:19:54+00:00 in 2.4 s  1.39.0  base c4cdd9c35dfa
 ```
 
 (Excerpts: the other lines match the demo above.) The recipe hash of the live run is
@@ -912,7 +916,7 @@ flowchart LR
 | Line and branch coverage of `src/` | 98.92% (gate: 90%) | `make cov` |
 | libtest parser, target resolution, flip and rerun tests | 58 passed (9 recorded runs of 3 toolchains) | `uv run pytest tests/test_libtest.py tests/test_flip.py tests/test_testtargets.py` |
 | Live strsim-rs rewind with 3 reruns of 104 tests in 2 stages, warm image | 21.1 s wall (4.2 s with `--reruns 0`) | `time uv run cargorewind rewind examples/strsim/strsim-rs.bundle --fix 605c81c9b9 --no-build-cache [--reruns 0]` |
-| One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:d56b85f51c7a8dc2 sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
+| One exact-name `cargo test` invocation on rust 1.39.0, nothing to rebuild | 7 ms (10 runs in 72 ms) | `docker run ... cargorewind/strsim-rs:edcbd61bae401cff sh -c 'for n in 1 .. 10; do cargo test --lib -- --exact tests::hamming_empty; done'` timed with `date +%s%N` |
 | Recipe, golden Dockerfile, probe and build cache tests | 65 passed | `uv run pytest tests/test_dockerfile.py tests/test_probes.py tests/test_buildcache.py` |
 | Dependency tests (semver, lockfile, index, pin loop, lock stage) | 100 passed | `uv run pytest tests/test_semver.py tests/test_lockfile.py tests/test_crateindex.py tests/test_deps.py tests/test_lockstage.py` |
 | Toolchain and registry tests | 90 passed | `uv run pytest tests/test_toolchain.py tests/test_registry.py` |

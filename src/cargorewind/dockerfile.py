@@ -5,8 +5,10 @@ toolchain and what rustup adds to it, the base commit, the dependency strategy (
 sha256 of a lockfile cargorewind wrote), vendoring, the identifiers of the sanity probe
 and the commands. Rendering is a pure function of it, so equal recipes give
 byte-identical Dockerfiles. The recipe hash is the sha256 of its canonical JSON (sorted
-keys, no whitespace, ASCII only); it is the build cache key, the image tag and the
-``cargorewind.recipe`` label of the image.
+keys, no whitespace, ASCII only) followed by the Dockerfile it renders (without the
+label line that carries the hash), so a change of the template (an ENV line, the probe
+step, the warm build) is a new recipe even when no field changed. The hash is the build
+cache key, the image tag and the ``cargorewind.recipe`` label of the image.
 
 Every field that reaches a Dockerfile line is validated with ``fullmatch`` when the
 recipe is created, so no value can carry a newline or shell syntax into the file.
@@ -141,12 +143,14 @@ class Recipe:
         return data
 
     def canonical_json(self) -> str:
-        """Sorted keys, no whitespace, ASCII only: the bytes the hash is taken over."""
+        """Sorted keys, no whitespace, ASCII only: the first part of the hashed bytes."""
         return json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
     @property
     def hash(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode()).hexdigest()
+        """sha256 of the canonical JSON, a newline and the Dockerfile body (no label)."""
+        material = f"{self.canonical_json()}\n{render_body(self)}"
+        return hashlib.sha256(material.encode()).hexdigest()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Recipe:
@@ -154,7 +158,7 @@ class Recipe:
         if data.get("schema") != RECIPE_SCHEMA:
             raise RecipeError(f"unsupported recipe schema {data.get('schema')!r}")
         known = {spec.name for spec in fields(cls)}
-        unknown = sorted(set(data) - known - {"schema", "hash"})
+        unknown = sorted(set(data) - known - {"schema", "hash", "dockerfile_sha256"})
         if unknown:
             raise RecipeError(f"unknown recipe fields: {', '.join(unknown)}")
         values: dict[str, Any] = {
@@ -166,8 +170,10 @@ class Recipe:
             raise RecipeError(f"incomplete recipe: {exc}") from exc
 
     def document(self) -> dict[str, Any]:
-        """The recipe.json document: the recipe plus its hash."""
-        return {**self.as_dict(), "hash": self.hash}
+        """The recipe.json document: the recipe, the sha256 of the Dockerfile body it
+        renders (the template part of the hash) and the hash."""
+        body = hashlib.sha256(render_body(self).encode()).hexdigest()
+        return {**self.as_dict(), "dockerfile_sha256": body, "hash": self.hash}
 
 
 def _toolchain_lines(recipe: Recipe) -> list[str]:
@@ -282,9 +288,11 @@ def render_toolchain_stage(recipe: Recipe) -> str:
     return "\n".join([*_stage_lines(recipe), ""])
 
 
-def render_dockerfile(recipe: Recipe) -> str:
-    """The environment Dockerfile. A date-bounded lockfile needs two stages: the pin loop
-    runs cargo in the ``toolchain`` stage, and the final stage copies its lockfile in."""
+def render_body(recipe: Recipe) -> str:
+    """The environment Dockerfile without its final recipe label: every line the image
+    is built from, which is why the recipe hash covers it. A date-bounded lockfile
+    needs two stages: the pin loop runs cargo in the ``toolchain`` stage, and the final
+    stage copies its lockfile in."""
     bounded = recipe.lock is LockStrategy.BOUNDED
     lines = [
         *_stage_lines(recipe),
@@ -293,8 +301,17 @@ def render_dockerfile(recipe: Recipe) -> str:
         *_dependency_lines(recipe),
         "# Warm build: compile dependencies and every test target once at base.",
         "RUN " + " ".join(recipe.warm_command),
-        "# Recipe hash: sha256 of the canonical recipe JSON (recipe.json); the cache key.",
-        f"LABEL {RECIPE_LABEL}={recipe.hash}",
         "",
     ]
     return "\n".join(lines)
+
+
+def render_dockerfile(recipe: Recipe) -> str:
+    """The environment Dockerfile: the body plus the recipe label on its last line."""
+    lines = [
+        "# Recipe hash: sha256 of the canonical recipe JSON (recipe.json) and of the lines",
+        "# above; the build cache key.",
+        f"LABEL {RECIPE_LABEL}={recipe.hash}",
+        "",
+    ]
+    return render_body(recipe) + "\n".join(lines)

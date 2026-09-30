@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import replace
@@ -8,10 +9,12 @@ from typing import Any
 
 import pytest
 
+from cargorewind import dockerfile
 from cargorewind.dockerfile import (
     LockStrategy,
     Recipe,
     RecipeError,
+    render_body,
     render_dockerfile,
     render_toolchain_stage,
     stage_test_command,
@@ -29,7 +32,7 @@ def test_render_without_lockfile_generates_one() -> None:
     assert "USER rewind" in lines
     assert "RUN cargo generate-lockfile" in lines
     assert "RUN cargo fetch --locked" not in lines
-    assert lines[-3] == "RUN cargo test --no-run"
+    assert lines[-4] == "RUN cargo test --no-run"
     assert lines[-1].startswith("LABEL cargorewind.recipe=")
     assert text.endswith("\n")
 
@@ -210,15 +213,41 @@ def test_golden_toolchain_stage_and_recipe_json() -> None:
         render_toolchain_stage(STRSIM)
 
 
-def test_recipe_hash_is_the_sha256_of_canonical_json() -> None:
+def test_recipe_hash_covers_the_canonical_json_and_the_dockerfile_body() -> None:
     canonical = STRSIM.canonical_json()
     assert canonical.startswith('{"base_commit":"c4cdd9c35dfaf7fa4e5e023d22854180b114dd9c",')
     assert " " not in canonical and canonical.isascii()
     assert json.loads(canonical) == STRSIM.as_dict()
+    body = render_body(STRSIM)
+    assert render_dockerfile(STRSIM).startswith(body) and "cargorewind.recipe" not in body
+    expected = hashlib.sha256(f"{canonical}\n{body}".encode()).hexdigest()
+    assert STRSIM.hash == expected
     # Pinned: a change here means every cached image and golden file changes too.
-    assert STRSIM.hash == "d56b85f51c7a8dc2ebab619ccb1458afe9b503211c2dc154a39101edb578058f"
-    assert f"LABEL cargorewind.recipe={STRSIM.hash}" in render_dockerfile(STRSIM)
-    assert STRSIM.document()["hash"] == STRSIM.hash
+    assert STRSIM.hash == "edcbd61bae401cffde7cb88d436491b9ecf7a98368354ae2a9478ec7d82b482a"
+    assert render_dockerfile(STRSIM).endswith(f"LABEL cargorewind.recipe={STRSIM.hash}\n")
+    document = STRSIM.document()
+    assert document["hash"] == STRSIM.hash
+    assert document["dockerfile_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+
+
+def test_a_template_change_is_a_new_recipe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: the hash covered the recipe fields only, so after an upgrade that
+    # changed the Dockerfile template a cached image built from the old template was
+    # still a cache hit, and the bundle's Dockerfile did not describe the image used.
+    before_text, before_hash = render_dockerfile(STRSIM), STRSIM.hash
+    real = dockerfile._stage_lines
+
+    def more_jobs(recipe: Recipe) -> list[str]:
+        return [line.replace("CARGO_BUILD_JOBS=2", "CARGO_BUILD_JOBS=8") for line in real(recipe)]
+
+    monkeypatch.setattr(dockerfile, "_stage_lines", more_jobs)
+    after_text = render_dockerfile(STRSIM)
+    assert "CARGO_BUILD_JOBS=8" in after_text and after_text != before_text
+    assert STRSIM.hash != before_hash
+    assert after_text.endswith(f"LABEL cargorewind.recipe={STRSIM.hash}\n")
+    assert STRSIM.canonical_json() == json.dumps(
+        STRSIM.as_dict(), sort_keys=True, separators=(",", ":")
+    )  # the fields did not change; only the template did
 
 
 @pytest.mark.parametrize(

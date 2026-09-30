@@ -8,6 +8,7 @@ import posixpath
 import re
 import shutil
 import tarfile
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -139,11 +140,40 @@ class Git:
     def grep_words(self, rev: str, words: list[str], pathspec: str) -> dict[str, list[str]]:
         """Files of ``rev`` matching ``pathspec`` that contain each of ``words`` as a whole
         word (``git grep -w -F``: letters, digits and underscores form words, as in GNU
-        grep). Words that occur nowhere are absent from the result."""
+        grep). Words that occur nowhere are absent from the result.
+
+        The words go through a pattern file (``-f``), so tens of thousands of them never
+        exceed the argument length limit. The output format is fixed on the command line
+        (no color, no line or column numbers), whatever the user's git configuration says.
+        """
         if not words:
             return {}
-        patterns = [arg for word in words for arg in ("-e", word)]
-        result = self._run("grep", "-I", "-o", "-w", "-F", "-z", *patterns, rev, "--", pathspec)
+        with tempfile.NamedTemporaryFile("w", prefix="words-", suffix=".txt", delete=False) as fh:
+            fh.write("".join(f"{word}\n" for word in words))
+            patterns = Path(fh.name)
+        try:
+            result = self._run(
+                "-c",
+                "grep.lineNumber=false",
+                "-c",
+                "grep.column=false",
+                "-c",
+                "color.grep=never",
+                "grep",
+                "-I",
+                "-o",
+                "-w",
+                "-F",
+                "-z",
+                "--no-color",
+                "-f",
+                str(patterns),
+                rev,
+                "--",
+                pathspec,
+            )
+        finally:
+            patterns.unlink(missing_ok=True)
         if result.returncode == 1:  # no match anywhere
             return {}
         found: dict[str, set[str]] = {}
