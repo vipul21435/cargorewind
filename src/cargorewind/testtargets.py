@@ -7,6 +7,12 @@ the library (``--lib``), a binary (``--bin <name>``), an integration test
 identified by that target and its name, so two binaries with a test of the same name
 stay two tests.
 
+Old cargo prints only the binary, and the library, a ``src/main.rs`` binary and a
+``tests/<crate>.rs`` integration test named after the crate all build a binary of the
+crate's name. Such a binary resolves to a ``shared`` target that names every candidate
+(``lib demo or test demo``) and is rerun with ``--tests``, which runs every binary
+``cargo test`` runs (but no doctests) and so reaches whichever of them has the test.
+
 One test is rerun with ``cargo test <selector> -- --exact <name>``, which libtest
 matches on every toolchain. Doctests are the exception: rustdoc splits its test
 arguments on whitespace, so a doctest name (``src/lib.rs - f (line 3)``) cannot be
@@ -24,17 +30,21 @@ from cargorewind.layout import Target
 from cargorewind.libtest import Suite, crate_name, doctest_item
 
 TARGET_KINDS = ("lib", "bin", "test", "bench", "example")
+SHARED = "shared"
 
 
 @dataclass(frozen=True, order=True)
 class TestTarget:
     __test__ = False  # not a pytest test class
 
-    kind: str  # lib, bin, test, bench, example, doc, or unknown
-    name: str  # the cargo target name (the crate name for doc, the binary for unknown)
+    kind: str  # lib, bin, test, bench, example, doc, shared, or unknown
+    name: str  # the cargo target name (the crate name for doc, the binary otherwise)
+    members: tuple[TestTarget, ...] = ()  # shared: the targets that binary may be
 
     @property
     def label(self) -> str:
+        if self.members:
+            return " or ".join(member.label for member in self.members)
         return f"{self.kind} {self.name}" if self.name else self.kind
 
     @property
@@ -44,6 +54,8 @@ class TestTarget:
             return ("--lib",)
         if self.kind == "doc":
             return ("--doc",)
+        if self.kind == SHARED:
+            return ("--tests",)  # every binary a stage run runs, but not the doctests
         if self.kind in TARGET_KINDS:
             return (f"--{self.kind}", self.name)
         return ()  # unknown: every binary runs, and the result is picked by binary name
@@ -92,8 +104,11 @@ class TargetMap:
                 guess = _from_path(suite)
                 if guess is not None:
                     return guess
-        if found:  # without a path (old cargo), the library comes first, then bins, tests
-            return TestTarget(found[0].kind, found[0].name)
+        members = tuple(dict.fromkeys(TestTarget(t.kind, t.name) for t in found))
+        if len(members) == 1:
+            return members[0]
+        if members:  # old cargo printed no path, and several targets build this binary
+            return TestTarget(SHARED, suite.binary, members)
         return TestTarget("unknown", suite.binary)
 
 

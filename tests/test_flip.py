@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from cargorewind.backend import RunResult
 from cargorewind.flip import (
     Flip,
@@ -317,3 +319,56 @@ def test_a_broken_crate_doctest_of_old_rustdoc_is_a_regression() -> None:
     crate_doc = next(r for r in plan["after"] if r.id == "src/lib.rs - (crate)")
     assert crate_doc.command == ("cargo", "test", "--doc", "--", "src/lib.rs")
     assert crate_doc.raw == "src/lib.rs -  (line 1)"
+
+
+SHARED_BINARY = Path(__file__).parent / "fixtures" / "libtest" / "shared-binary-1.39.0.txt"
+
+
+def _recorded_sections() -> dict[str, str]:
+    """The ``@@@ <name>`` sections of the rust 1.39.0 recording (header comments dropped)."""
+    sections: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in SHARED_BINARY.read_text().splitlines():
+        if line.startswith("@@@ "):
+            current = sections.setdefault(line.removeprefix("@@@ "), [])
+        elif not line.startswith("# "):
+            current.append(line)
+    return {name: "\n".join(lines) + "\n" for name, lines in sections.items()}
+
+
+def test_old_cargo_reruns_a_test_of_tests_named_after_the_crate_in_its_own_binary() -> None:
+    # On rust 1.39 the library and tests/tempdemo.rs both run as tempdemo-<hash>.
+    sections = _recorded_sections()
+    targets = TargetMap(
+        [Target("lib", "tempdemo", "src/lib.rs"), Target("test", "tempdemo", "tests/tempdemo.rs")]
+    )
+    codes = {"base": 0, "before": 101, "after": 0}
+    stages = {s: stage_tests(s, RunResult(codes[s], sections[s]), targets) for s in codes}
+    flip = compute_flip(stages["base"], stages["before"], stages["after"])
+    assert flip.fail_to_pass == ["new_case"]
+    assert flip.pass_to_pass == [
+        "existing",
+        "src/lib.rs - (crate)",
+        "src/lib.rs - Wrapper<T>::get",
+        "src/lib.rs - one",
+        "tests::unit",
+    ]
+    shared = flip.keys["new_case"][0]
+    assert shared.label == "lib tempdemo or test tempdemo"
+    plan = rerun_plan(flip, stages, ("cargo", "test", "--no-fail-fast"))
+    new = next(item for item in plan["after"] if item.id == "new_case")
+    assert new.command == ("cargo", "test", "--tests", "--", "--exact", "new_case")
+    # The recorded output of that command: new_case fails before and passes after.
+    reruns = {}
+    for name, code in (("before", 101), ("after", 0)):
+        items = [item for item in plan[name] if item.id == "new_case"]
+        body = sections[f"rerun-{name}"]
+        output = "".join(_segment(round_, 0, body, code) for round_ in (1, 2, 3))
+        reruns[name] = parse_reruns(output, items, 3, targets)
+    assert reruns["before"] == {new.key: [F, F, F]} and reruns["after"] == {new.key: [P, P, P]}
+    final = apply_reruns(flip, stages, reruns)
+    assert final.fail_to_pass == ["new_case"] and final.flaky == [] and final.verified
+    # `cargo test --lib -- --exact new_case` ran the library binary alone: the test was
+    # missing from every round, which made it flaky and emptied FAIL_TO_PASS.
+    lib_only = parse_reruns(_segment(1, 0, sections["old-rerun"], 0), [new], 1, targets)
+    assert lib_only == {new.key: [Status.MISSING]}

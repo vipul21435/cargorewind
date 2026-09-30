@@ -4,7 +4,7 @@ import pytest
 
 from cargorewind.layout import Target
 from cargorewind.libtest import Suite, suite_of
-from cargorewind.testtargets import UNKNOWN_TARGET, TargetMap, TestTarget, rerun_command
+from cargorewind.testtargets import SHARED, UNKNOWN_TARGET, TargetMap, TestTarget, rerun_command
 
 TARGETS = [
     Target("lib", "my_crate", "src/lib.rs"),
@@ -57,8 +57,7 @@ TARGETS = [
             "member",
         ),
         ("   Doc-tests my-crate", "doc", "my_crate"),
-        # Old cargo prints only the binary: the library wins over the test of the same name.
-        ("     Running t/debug/deps/my_crate-0123456789abcdef", "lib", "my_crate"),
+        # Old cargo prints only the binary, which the layout maps when one target builds it.
         ("     Running t/debug/deps/it-0123456789abcdef", "test", "it"),
         ("     Running t/debug/deps/demo-0123456789abcdef", "example", "demo"),
         # Targets the layout does not list: the printed path says what they are.
@@ -156,3 +155,39 @@ def test_rerun_commands() -> None:
         "--exact",
         "d",
     )
+
+
+def test_old_cargo_binaries_that_several_targets_build_resolve_to_all_of_them() -> None:
+    # Before cargo printed source paths, the library, src/main.rs and tests/my_crate.rs
+    # all ran as `my_crate-<hash>`: which one reported a test is unknown.
+    suite = suite_of("     Running t/debug/deps/my_crate-0123456789abcdef")
+    assert suite is not None
+    shared = TargetMap(TARGETS).resolve(suite)
+    assert shared == TestTarget(
+        SHARED,
+        "my_crate",
+        (
+            TestTarget("lib", "my_crate"),
+            TestTarget("bin", "my-crate"),
+            TestTarget("test", "my_crate"),
+        ),
+    )
+    assert shared.label == "lib my_crate or bin my-crate or test my_crate"
+    # --tests runs every binary a stage runs (not the doctests), so the rerun reaches the
+    # test wherever it is, and is valid in a stage where one of the targets is missing.
+    assert shared.selector == ("--tests",)
+    stage = ("cargo", "test", "--no-fail-fast")
+    assert rerun_command(shared, "new_case", stage) == (
+        "cargo",
+        "test",
+        "--tests",
+        "--",
+        "--exact",
+        "new_case",
+    )
+    # The same target listed twice (two packages of a workspace) is still one target.
+    twice = TargetMap(
+        [Target("lib", "member", "a/src/lib.rs"), Target("lib", "member", "b/src/lib.rs")]
+    )
+    plain = suite_of("     Running t/debug/deps/member-0123456789abcdef")
+    assert plain is not None and twice.resolve(plain) == TestTarget("lib", "member")
