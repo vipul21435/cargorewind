@@ -10,10 +10,13 @@ from typer.testing import CliRunner
 
 from cargorewind import __version__, cli, registry
 from cargorewind.backend import ReplayBackend
+from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.deps import Pin
 from cargorewind.libtest import Outcome, compute_flip
 from cargorewind.probes import ProbeReport
 from cargorewind.registry import DigestCache, HttpResponse, ImageResolver, RegistryClient
+from cargorewind.runner import CommandResult
+from tests.test_buildcache import FakeBuilder, FakeDocker
 from tests.test_deps import INDEX, FakeCargo
 from tests.test_gitops import linked_repo
 from tests.test_registry import FakeHttp, recorded
@@ -77,6 +80,7 @@ def test_rewind_replay_prints_verified_flip(tmp_path: Path) -> None:
     assert "verdict       VERIFIED fail-to-pass flip" in result.stdout
     assert "probes        2 identifier(s) passed" in result.stdout
     assert "probe     in Docker: build passed, before passed, after passed" in result.stdout
+    assert "(cache off: no build cache (replay, record or --no-build-cache))" in result.stdout
     assert (tmp_path / "out" / "task.json").is_file()
     assert (tmp_path / "out" / "recipe.json").is_file()
 
@@ -88,6 +92,74 @@ def test_rewind_record_writes_a_transcript(tmp_path: Path, monkeypatch: pytest.M
     result = runner.invoke(cli.app, _demo_args(tmp_path, "--record", str(record)))
     assert result.exit_code == 0, result.output
     assert json.loads(record.read_text())["runs"]["after"]["exit_code"] == 0
+
+
+def test_rewind_uses_the_build_cache_for_live_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker = FakeDocker()
+    made: list[Path] = []
+
+    def cache_factory(directory: Path, _runner: object) -> BuildCache:
+        made.append(directory)
+        return BuildCache(directory, docker)
+
+    replayed = ReplayBackend(DEMO / "transcript.json")
+    monkeypatch.setattr(cli, "DockerBackend", lambda runner, timeout: replayed)
+    monkeypatch.setattr(cli, "BuildCache", cache_factory)
+    args = _demo_args(tmp_path, "--cache-dir", str(tmp_path / "cache"))
+    first = runner.invoke(cli.app, args)
+    assert first.exit_code == 0, first.output
+    assert "(cache miss: no image for this recipe; built in " in first.stdout
+    recipe = json.loads((tmp_path / "out" / "recipe.json").read_text())["hash"]
+    tag = f"cargorewind/strsim-rs:{recipe[:16]}"
+    built = json.loads((DEMO / "transcript.json").read_text())["build"]["image_id"]
+    docker.images[tag] = (built, recipe)  # what a real build leaves behind
+    second = runner.invoke(cli.app, args)
+    assert second.exit_code == 0, second.output
+    assert f"build     {tag} (cache hit: image {tag} built " in second.stdout
+    assert made == [tmp_path / "cache", tmp_path / "cache"]
+
+    listed = runner.invoke(cli.app, ["cache", "list", "--cache-dir", str(tmp_path / "cache")])
+    assert listed.exit_code == 0, listed.output
+    assert f"{recipe[:16]}  {tag}  built " in listed.stdout
+    assert "1.39.0  base c4cdd9c35dfa" in listed.stdout
+
+    off = runner.invoke(cli.app, [*args, "--no-build-cache"])
+    assert off.exit_code == 0 and len(made) == 3  # two rewinds and the listing, not this run
+    assert "(cache off: no build cache (replay, record or --no-build-cache))" in off.stdout
+
+
+def test_cache_list_and_prune(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    docker = FakeDocker()
+    monkeypatch.setattr(cli, "SubprocessRunner", lambda: docker)
+    cache_dir = tmp_path / "cache"
+    empty = runner.invoke(cli.app, ["cache", "list", "--cache-dir", str(cache_dir)])
+    assert empty.exit_code == 0
+    assert f"index     {cache_dir / 'build-index.json'} (0 image(s))" in empty.stdout
+    cache = BuildCache(cache_dir, docker)
+    live, gone = "1" * 64, "2" * 64
+    for recipe in (live, gone):
+        request = BuildRequest(f"cargorewind/x:{recipe[:16]}", recipe, "x", "c" * 40, "1.70.0")
+        cache.build(FakeBuilder(docker, recipe), tmp_path, request)
+    del docker.images[f"cargorewind/x:{gone[:16]}"]
+    pruned = runner.invoke(cli.app, ["cache", "prune", "--cache-dir", str(cache_dir)])
+    assert pruned.exit_code == 0, pruned.output
+    assert "docker    Deleted Images:" in pruned.stdout
+    assert f"stale     {gone[:16]}: its image is gone; entry removed" in pruned.stdout
+    assert "index     1 entry(ies) removed, 1 kept" in pruned.stdout
+    (cache_dir / "build-index.json").write_text("{broken")
+    noted = runner.invoke(cli.app, ["cache", "list", "--cache-dir", str(cache_dir)])
+    assert "note      unreadable build index" in noted.stdout
+
+    class DockerDown(FakeDocker):
+        def run(self, argv: Any, **kwargs: Any) -> CommandResult:
+            return CommandResult(tuple(argv), 1, "", "Cannot connect to the Docker daemon\n")
+
+    monkeypatch.setattr(cli, "SubprocessRunner", DockerDown)
+    failed = runner.invoke(cli.app, ["cache", "prune", "--cache-dir", str(cache_dir)])
+    assert failed.exit_code == 1
+    assert "Cannot connect to the Docker daemon" in failed.output
 
 
 def test_rewind_rejects_conflicting_or_unpinned_options(tmp_path: Path) -> None:

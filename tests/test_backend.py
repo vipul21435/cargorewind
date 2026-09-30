@@ -100,6 +100,8 @@ def test_docker_build_uses_label_and_returns_image_id(tmp_path: Path) -> None:
     )
     assert build["cwd"] == tmp_path
     assert build["timeout"] == 5
+    DockerBackend(runner).build(_context(tmp_path), "cargorewind/x:1", no_cache=True)
+    assert runner.calls[2]["argv"][-2:] == ("--no-cache", ".")  # type: ignore[index]
 
 
 def test_docker_build_failure_raises(tmp_path: Path) -> None:
@@ -147,7 +149,9 @@ class _StubBackend:
     def __init__(self) -> None:
         self.session = _StubSession()
 
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
         return BuildResult(f"sha256:img-{target or 'final'}", "log")
 
     def run_tests(

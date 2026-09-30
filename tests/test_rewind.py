@@ -10,6 +10,7 @@ import pytest
 
 from cargorewind import rewind as rewind_module
 from cargorewind.backend import BuildResult, Overlay, ReplayBackend, RunResult
+from cargorewind.buildcache import BuildCache
 from cargorewind.deps import LOCK_BEGIN, LOCK_END, Pin
 from cargorewind.dockerfile import PROBE_MARKER
 from cargorewind.gitops import GitError
@@ -19,6 +20,7 @@ from cargorewind.rewind import ProbeError, RewindOptions, rewind
 from cargorewind.runner import SubprocessRunner
 from cargorewind.toolchain import IMAGE_DIGESTS, ToolchainError
 from tests.conftest import GitRepo
+from tests.test_buildcache import FakeDocker
 from tests.test_deps import INDEX, FakeCargo
 from tests.test_registry import FakeHttp
 
@@ -87,15 +89,19 @@ class ScriptedBackend:
         self.overlays: dict[str, Overlay] = {}
         self.commands: dict[str, tuple[str, ...]] = {}
         self.builds: list[tuple[str, str | None, bool]] = []
+        self.no_cache: list[bool] = []
         self.probes: dict[str, tuple[str, ...]] = {}
         self.tags: dict[str, str] = {}
         self.dockerfile = ""
         self.session = session
 
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
         self.dockerfile = (context / "Dockerfile").read_text()
         assert (context / "repo" / "src" / "lib.rs").read_text() == LIB
         self.builds.append((tag, target, (context / "Cargo.lock").exists()))
+        self.no_cache.append(no_cache)
         return BuildResult("sha256:fake", "built\n")
 
     def run_tests(
@@ -232,6 +238,8 @@ def test_rewind_probes_and_recipe_of_the_synthetic_crate(
     assert backend.dockerfile.endswith(f"LABEL cargorewind.recipe={recipe['hash']}\n")
     assert task["image_tag"] == f"cargorewind/origin:{recipe['hash'][:16]}"
     assert backend.tags["after"] == task["image_tag"]
+    assert task["build_cache"]["status"] == "off"
+    assert backend.no_cache == [False]
 
 
 PASSING = {
@@ -394,6 +402,52 @@ def test_a_failed_host_probe_stops_before_docker(
         rewind(options, SubprocessRunner(), backend, lambda _: None)
     assert backend.builds == []
     assert json.loads((out / "probes.json").read_text())["ok"] is False
+
+
+class LabellingBackend(ScriptedBackend):
+    """Registers each build in FakeDocker with the recipe label of its Dockerfile."""
+
+    def __init__(self, docker: FakeDocker) -> None:
+        super().__init__(PASSING)
+        self.docker = docker
+
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
+        result = super().build(context, tag, target, no_cache=no_cache)
+        label = self.dockerfile.rstrip().rsplit("=", 1)[-1]
+        self.docker.images[tag] = (f"sha256:built{len(self.builds)}", label)
+        return result
+
+
+def test_rewind_reuses_the_image_of_an_unchanged_recipe(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    repo = make_repo("origin")
+    _, fix = _crate(repo, lockfile=True)
+    docker = FakeDocker()
+    backend = LabellingBackend(docker)
+    cache = BuildCache(tmp_path / "cache", docker)
+    lines: list[str] = []
+
+    def run(out: str, rebuild: bool = False) -> dict[str, Any]:
+        options = RewindOptions(
+            str(repo.path), fix, tmp_path / out, tmp_path / "work", cache=cache, rebuild=rebuild
+        )
+        rewind(options, SubprocessRunner(), backend, lines.append)
+        return dict(json.loads((tmp_path / out / "task.json").read_text()))
+
+    first, second = run("one"), run("two")
+    assert first["build_cache"]["status"] == "miss"
+    assert second["build_cache"]["status"] == "hit"
+    assert first["recipe"] == second["recipe"] and first["image_tag"] == second["image_tag"]
+    assert len(backend.builds) == 1 and second["verified"] is True
+    assert any(ln.startswith(f"build     {first['image_tag']} (cache hit: image ") for ln in lines)
+    third = run("three", rebuild=True)
+    assert third["build_cache"]["status"] == "miss"
+    assert third["build_cache"]["reason"].startswith("--rebuild: built with --no-cache")
+    assert backend.no_cache == [False, True]
+    assert list(cache.entries()) == [first["recipe"]["hash"]]
 
 
 def test_rewind_detects_patches_that_do_not_reproduce_the_fix(

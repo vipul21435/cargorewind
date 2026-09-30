@@ -96,7 +96,9 @@ class Session(Protocol):
 
 
 class Backend(Protocol):
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult: ...
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult: ...
 
     def run_tests(
         self,
@@ -171,10 +173,14 @@ class DockerBackend:
         self.runner = runner
         self.timeout = timeout
 
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
         argv = ["docker", "build", "--progress=plain", "--label", PROJECT_LABEL, "-t", tag]
         if target is not None:
             argv += ["--target", target]
+        if no_cache:
+            argv.append("--no-cache")
         result = self.runner.run([*argv, "."], cwd=context, timeout=self.timeout)
         checked(result)
         inspect = self.runner.run(["docker", "image", "inspect", "--format", "{{.Id}}", tag])
@@ -258,8 +264,10 @@ class RecordingBackend:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n")
 
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
-        result = self.inner.build(context, tag, target)
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
+        result = self.inner.build(context, tag, target, no_cache=no_cache)
         self.data[_build_key(target)] = {
             "dockerfile_sha256": _dockerfile_digest(context),
             "image_id": result.image_id,
@@ -320,7 +328,9 @@ class ReplayBackend:
             raise ReplayError(f"{path}: unsupported transcript schema {data.get('schema')!r}")
         self.data: dict[str, Any] = data
 
-    def build(self, context: Path, tag: str, target: str | None = None) -> BuildResult:
+    def build(
+        self, context: Path, tag: str, target: str | None = None, *, no_cache: bool = False
+    ) -> BuildResult:
         recorded = self.data.get(_build_key(target))
         if not recorded:
             raise ReplayError(f"{self.path}: no recorded {_build_key(target)}")

@@ -1,5 +1,5 @@
-"""The end-to-end rewind: checkout, split, toolchain, probes, recipe, build, three runs,
-bundle."""
+"""The end-to-end rewind: checkout, split, toolchain, probes, recipe, cached build, three
+runs, bundle."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 
 from cargorewind import __version__
 from cargorewind.backend import Backend, BuildResult, Overlay, RunResult
+from cargorewind.buildcache import BuildCache, BuildRequest
 from cargorewind.crateindex import CrateIndex
 from cargorewind.dockerfile import PROBE_GLOB, LockStrategy, Recipe, render_dockerfile
 from cargorewind.gitops import Git, GitError, GitTree, open_checkout
@@ -52,10 +53,20 @@ class RewindOptions:
     resolver: ImageResolver | None = None  # default: the offline digest table
     vendor: bool = False
     index: CrateIndex | None = None  # default: the live sparse index behind the cache
+    cache: BuildCache | None = None  # None: always build (Docker's layer cache still applies)
+    rebuild: bool = False  # skip the cache lookup and build with --no-cache
 
 
 class ProbeError(RuntimeError):
     """A host-side sanity probe failed; nothing was built."""
+
+
+@dataclass(frozen=True)
+class BuildOutcome:
+    tag: str
+    result: BuildResult
+    cache: str  # hit, miss or off
+    reason: str
 
 
 @dataclass
@@ -76,15 +87,14 @@ class RewindReport:
     lock: LockPlan
     split: SplitResult
     recipe: Recipe
-    tag: str
-    built: BuildResult
+    build: BuildOutcome
     probes: ProbeReport
     runs: dict[str, StageRun] = field(default_factory=dict)
     flip: Flip | None = None
 
     @property
     def image_id(self) -> str:
-        return self.built.image_id
+        return self.build.result.image_id
 
     @property
     def verified(self) -> bool:
@@ -109,7 +119,8 @@ class RewindReport:
             "vendored": self.lock.vendor,
             "test_command": " ".join(self.recipe.test_command),
             "recipe": {"hash": self.recipe.hash, "report": "recipe.json"},
-            "image_tag": self.tag,
+            "image_tag": self.build.tag,
+            "build_cache": {"status": self.build.cache, "reason": self.build.reason},
             "probes": {
                 "identifiers": [p.as_dict() for p in self.probes.probes],
                 "skipped": len(self.probes.skipped),
@@ -205,6 +216,23 @@ def build_overlays(
     return {"base": Overlay(), "before": before, "after": after}
 
 
+def _build(
+    options: RewindOptions,
+    backend: Backend,
+    context: Path,
+    request: BuildRequest,
+    log: Log,
+) -> BuildOutcome:
+    """Reuse or build the image through the cache, or build it directly without one."""
+    if options.cache is None:
+        result = backend.build(context, request.tag, no_cache=options.rebuild)
+        reason = "no build cache (replay, record or --no-build-cache)"
+        return BuildOutcome(request.tag, result, "off", reason)
+    cached = options.cache.build(backend, context, request, rebuild=options.rebuild, log=log)
+    status = "hit" if cached.hit else "miss"
+    return BuildOutcome(cached.tag, cached.result, status, cached.reason)
+
+
 def _environment(
     options: RewindOptions, commits: Commits, split: SplitResult, log: Log
 ) -> tuple[Toolchain, LockPlan, ImageChoice, tuple[str, ...]]:
@@ -233,7 +261,7 @@ def _run_stages(
     for stage in STAGES:
         required = probes.required(stage)
         command = report.recipe.test_command
-        result = backend.run_tests(report.tag, stage, overlays[stage], command, required)
+        result = backend.run_tests(report.build.tag, stage, overlays[stage], command, required)
         probes.record_stage(stage, result.output)
         (logs / f"{stage}.log").write_text(result.output)
         outcomes = parse_libtest(result.output)
@@ -282,12 +310,13 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         write_lock_report(out, options.source, commits, toolchain, plan)
         log(f"recipe    {recipe.hash}")
         tag = recipe_tag(options.source, recipe)
-        log(f"build     {tag}")
-        built = backend.build(context, tag)
+        request = BuildRequest(tag, recipe.hash, options.source, base, recipe.toolchain)
+        build = _build(options, backend, context, request, log)
+    log(f"build     {build.tag} (cache {build.cache}: {build.reason})")
     probes.container["build"] = "passed" if probes.words else "no probe"
     logs = out / "logs"
     logs.mkdir(exist_ok=True)
-    (logs / "build.log").write_text(built.log)
+    (logs / "build.log").write_text(build.result.log)
 
     report = RewindReport(
         options.source,
@@ -299,8 +328,7 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
         plan,
         split,
         recipe,
-        tag,
-        built,
+        build,
         probes,
     )
     _run_stages(report, backend, overlays, logs, log)

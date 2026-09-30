@@ -17,6 +17,7 @@ from cargorewind.backend import (
     ReplayBackend,
     ReplayError,
 )
+from cargorewind.buildcache import BuildCache, BuildCacheError
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
 from cargorewind.deps import LockError
 from cargorewind.dockerfile import LockStrategy, RecipeError
@@ -32,7 +33,7 @@ from cargorewind.lockstage import (
     write_lock_report,
 )
 from cargorewind.patchsplit import PatchError
-from cargorewind.registry import make_resolver
+from cargorewind.registry import default_cache_dir, make_resolver
 from cargorewind.rewind import ProbeError, RewindOptions, RewindReport, rewind
 from cargorewind.runner import CommandError, SubprocessRunner
 from cargorewind.splitreport import resolve_commits, split_commit
@@ -109,6 +110,7 @@ REPLAY_OPTION = typer.Option("--replay", help="Replay Docker runs from a transcr
 TIMEOUT_OPTION = typer.Option("--timeout", help="Seconds allowed per docker build or run.")
 # Errors that end a command with exit code 1 and a one-line message.
 FAILURES = (
+    BuildCacheError,
     CommandError,
     GitError,
     LockError,
@@ -272,11 +274,31 @@ def rewind_command(
         ),
     ] = False,
     index_dir: Annotated[Path | None, INDEX_DIR_OPTION] = None,
+    build_cache: Annotated[
+        bool,
+        typer.Option(
+            "--build-cache/--no-build-cache",
+            help=(
+                "Reuse the image of an identical recipe (index in the cache directory). "
+                "Always off with --record and --replay."
+            ),
+        ),
+    ] = True,
+    rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--rebuild",
+            help="Ignore a cached image and build with docker build --no-cache.",
+        ),
+    ] = False,
 ) -> None:
     """Rebuild SOURCE at the fix's base commit and verify the fail-to-pass flip."""
     if image is not None and "@sha256:" not in image:
         raise typer.BadParameter("--image must be pinned by digest (name@sha256:...)")
     backend = _backend(record, replay, timeout)
+    cache = None
+    if build_cache and record is None and replay is None:
+        cache = BuildCache(cache_dir or default_cache_dir(), SubprocessRunner())
     options = RewindOptions(
         source=source,
         fix=fix,
@@ -287,6 +309,8 @@ def rewind_command(
         resolver=make_resolver(registry, cache_dir),
         vendor=vendor,
         index=_index(index_dir),
+        cache=cache,
+        rebuild=rebuild,
     )
     try:
         report = rewind(options, SubprocessRunner(), backend, typer.echo)
@@ -353,3 +377,41 @@ def lock_command(
     typer.echo(f"wrote     {out}/ ({wrote})")
     if plan.bound is not None and not plan.bound.bounded:
         raise typer.Exit(code=EXIT_NOT_VERIFIED)
+
+
+cache_app = typer.Typer(
+    name="cache",
+    help="Inspect or prune the recipe-hash build cache.",
+    no_args_is_help=True,
+)
+app.add_typer(cache_app)
+
+
+@cache_app.command("list")
+def cache_list(cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None) -> None:
+    """List the cached images by recipe hash (no Docker needed)."""
+    cache = BuildCache(cache_dir or default_cache_dir(), SubprocessRunner())
+    entries = cache.entries()
+    if cache.note:
+        typer.echo(f"note      {cache.note}")
+    typer.echo(f"index     {cache.index_path} ({len(entries)} image(s))")
+    for recipe, entry in sorted(entries.items(), key=lambda item: item[1].built_at):
+        typer.echo(
+            f"{recipe[:16]}  {entry.tag}  built {entry.built_at or '?'} "
+            f"in {entry.build_seconds:g} s  {entry.toolchain}  base {entry.base_commit[:12]}"
+        )
+
+
+@cache_app.command("prune")
+def cache_prune(cache_dir: Annotated[Path | None, CACHE_DIR_OPTION] = None) -> None:
+    """Remove this project's dangling images and index entries whose image is gone."""
+    cache = BuildCache(cache_dir or default_cache_dir(), SubprocessRunner())
+    try:
+        pruned = cache.prune()
+    except CommandError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"docker    {pruned.docker_output or 'nothing to prune'}")
+    for recipe in pruned.stale:
+        typer.echo(f"stale     {recipe[:16]}: its image is gone; entry removed")
+    typer.echo(f"index     {len(pruned.stale)} entry(ies) removed, {pruned.kept} kept")
