@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from cargorewind.batch import (
     summary_document,
     summary_markdown,
     summary_table,
+    task_key,
     task_options,
     with_defaults,
 )
@@ -27,6 +29,8 @@ from cargorewind.runner import CommandError, CommandResult, SubprocessRunner
 from tests.conftest import GitRepo
 from tests.test_rewind import (
     DEMO,
+    FIXED,
+    LIB,
     PASSING,
     TRIPLE_RUNS,
     ScriptedBackend,
@@ -181,11 +185,11 @@ def test_run_batch_dedupes_records_errors_and_summarizes(
     assert (tmp_path / "out" / "good" / "task.json").exists()
     assert (good_result.fail_to_pass, good_result.pass_to_pass, good_result.flaky) == (1, 1, 0)
     assert good_result.toolchain == "1.70.0" and good_result.fix_commit == fix
-    assert twin.detail == "same repository and fix commit as good" and twin.out is None
+    assert twin.detail == "same repository, fix, base and options as good" and twin.out is None
     assert not (tmp_path / "out" / "twin").exists()
     assert regressed.detail == "regressions: tests::zero"
     assert unknown.detail.startswith("unknown commit: 0000") and unknown.fix_commit == ""
-    assert "skip      same repository and fix commit as good" in lines
+    assert "skip      same repository, fix, base and options as good" in lines
     assert any(line.startswith("result    good: verified in ") for line in lines)
     assert any(line.startswith("error     unknown commit") for line in lines)
 
@@ -312,10 +316,10 @@ def test_a_task_after_an_error_runs_and_names_are_owned_by_verdicts(
     assert results[0].detail == "command exited 1: docker build"
     assert results[1].out == tmp_path / "out" / "first"
     assert results[2].detail == (
-        f"bundle directory first is taken by task {repo.path} --fix {fix}; "
+        f"bundle directory first is taken by task first: {repo.path} --fix {fix}; "
         "give this task another name"
     )
-    assert results[3].detail == "same repository and fix commit as first"
+    assert results[3].detail == "same repository, fix, base and options as first"
 
 
 def test_local_paths_below_the_working_directory_are_spelled_relative(
@@ -402,3 +406,129 @@ def test_two_repositories_with_one_name_get_their_own_checkouts(
     )
     assert [r.status for r in results] == ["verified", "verified"]
     assert [r.fix_commit for r in results] == [fix_one, fix_two]
+
+
+def test_scp_like_urls_stay_urls_and_existing_paths_stay_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git's rule: a colon before the first slash is an scp-like URL, whatever the user
+    or host (an ~/.ssh/config alias); the recipes file sits in a subdirectory."""
+    (tmp_path / "rv").mkdir()
+    (tmp_path / "rv" / "local:crate").mkdir()
+    recipes = tmp_path / "rv" / "scp.toml"
+    repos = [
+        "gh-work:rapidfuzz/strsim-rs.git",
+        "deploy@git.example.org:team/strsim-rs.git",
+        "git@github.com:rapidfuzz/strsim-rs.git",
+        "ssh://git@example.org/team/strsim-rs.git",
+        "local:crate",  # exists next to the recipes file: a path, as git clone sees it
+        "../crates/a.bundle",
+    ]
+    recipes.write_text("".join(f'[[task]]\nrepo = "{r}"\nfix = "605c81c9b9"\n' for r in repos))
+    monkeypatch.chdir(tmp_path)
+    assert [t.repo for t in load_recipes(Path("rv/scp.toml"))] == [
+        *repos[:4],
+        str(Path("rv/local:crate")),
+        str(Path("rv/../crates/a.bundle")),
+    ]
+
+
+def test_names_that_differ_only_in_case_or_normalization_are_one_directory(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    """On APFS (macOS) Demo and demo are one directory: the later task must be an error,
+    not a silent overwrite of the earlier task's verified bundle."""
+    first = make_repo("one")
+    _, fix_one = _crate(first, lockfile=True)
+    second = make_repo("two")
+    fix_two = _triple_crate(second)
+    third = make_repo("three")
+    _, fix_three = _crate(third, lockfile=True)
+    tasks = [
+        BatchTask(str(first.path), fix_one, name="Demo"),
+        BatchTask(str(second.path), fix_two, name="demo"),
+        BatchTask(str(second.path), fix_two, name="caf\u00e9"),  # NFC
+        BatchTask(str(third.path), fix_three, name="cafe\u0301"),  # NFD, another task
+    ]
+    runs = {"Demo": PASSING, "demo": TRIPLE_RUNS, "caf\u00e9": TRIPLE_RUNS}
+    options = BatchOptions(tmp_path / "out", tmp_path / "work", failures=(GitError,))
+    results = run_batch(
+        tasks,
+        options,
+        SubprocessRunner(),
+        lambda task: ScriptedBackend(runs.get(task.name or "", PASSING)),
+        lambda _: None,
+    )
+    assert [r.status for r in results] == ["verified", "error", "verified", "error"]
+    assert results[1].detail.startswith("bundle directory demo is taken by task Demo: ")
+    assert results[3].detail.startswith("bundle directory cafe\u0301 is taken by task caf\u00e9: ")
+    task = json.loads((tmp_path / "out" / "Demo" / "task.json").read_text())
+    assert task["fix_commit"] == fix_one
+
+
+def test_an_explicit_base_or_other_options_make_another_task(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    """The base decides the patches and the test lists, vendor and image the environment:
+    a task that differs in any of them is not a duplicate."""
+    repo = make_repo("origin")
+    crate = {
+        "Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\n',
+        "src/lib.rs": LIB,
+        "rust-toolchain": "1.70\n",
+        "Cargo.lock": "version = 3\n",
+        "README.md": "one\n",
+    }
+    older = repo.commit("older", crate, "2024-01-09T12:00:00+00:00")
+    parent = repo.commit("docs", {"README.md": "two\n"}, "2024-01-10T12:00:00+00:00")
+    fix = repo.commit("fix", {"src/lib.rs": FIXED}, "2024-01-11T12:00:00+00:00")
+    tasks = [
+        BatchTask(str(repo.path), fix, name="vs-parent"),
+        BatchTask(str(repo.path), fix, base=older[:8], name="vs-older"),
+        BatchTask(str(repo.path), fix, base=parent[:9], name="parent-spelled"),
+    ]
+    options = BatchOptions(tmp_path / "out", tmp_path / "work", failures=(GitError,))
+    results = run_batch(
+        tasks, options, SubprocessRunner(), lambda task: ScriptedBackend(PASSING), lambda _: None
+    )
+    assert [r.status for r in results] == ["verified", "verified", "duplicate"]
+    assert results[1].base_commit == older and results[0].base_commit == parent
+    assert results[2].detail == "same repository, fix, base and options as vs-parent"
+    plain = BatchTask("r/x.bundle", "abc")
+    assert task_key(plain, fix, parent) != task_key(replace(plain, vendor=True), fix, parent)
+    assert task_key(plain, fix, parent) != task_key(
+        replace(plain, image="rust@sha256:1"), fix, parent
+    )
+    assert task_key(plain, fix, parent) == task_key(replace(plain, name="n"), fix, parent)
+
+
+def test_a_reused_bundle_directory_keeps_nothing_of_the_last_task(
+    make_repo: Callable[[str], GitRepo], tmp_path: Path
+) -> None:
+    """A directory left by another task (an earlier run into the same --out, or an
+    attempt that ended with an error) must not end up in the new task.json."""
+    repo = make_repo("origin")
+    _, fix = _crate(repo, lockfile=True)  # committed lockfile: rewind writes no Cargo.lock
+    stale = tmp_path / "out" / "x"
+    (stale / "logs").mkdir(parents=True)
+    (stale / "verify" / "logs").mkdir(parents=True)
+    for name in ("Cargo.lock", "logs/rerun-before.log", "verify/verify.json", "lock.json"):
+        (stale / name).write_text("another task\n")
+    (stale / "verify" / "logs" / "after.log").write_text("another task\n")
+    (stale / "notes.txt").write_text("not a bundle file\n")
+    options = BatchOptions(tmp_path / "out", tmp_path / "work", reruns=0)
+    (result,) = run_batch(
+        [BatchTask(str(repo.path), fix, name="x")],
+        options,
+        SubprocessRunner(),
+        lambda task: ScriptedBackend(PASSING),
+        lambda _: None,
+    )
+    assert result.status == "verified"
+    task = json.loads((stale / "task.json").read_text())
+    assert "Cargo.lock" not in task["files"] and not (stale / "Cargo.lock").exists()
+    assert not any(name.startswith("logs/rerun") for name in task["files"])
+    assert not (stale / "verify" / "verify.json").exists()
+    assert not (stale / "verify" / "logs" / "after.log").exists()
+    assert (stale / "lock.json").read_text() != "another task\n"
+    assert (stale / "notes.txt").exists()  # not a bundle file: left alone

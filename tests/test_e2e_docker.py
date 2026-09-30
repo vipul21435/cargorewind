@@ -171,7 +171,7 @@ def test_live_batch_verifies_two_real_crates(tmp_path: Path) -> None:
 
     strsim, semver, again = results
     assert [r.status for r in results] == ["verified", "verified", "duplicate"]
-    assert again.detail == "same repository and fix commit as strsim-jaro-length-one"
+    assert again.detail == "same repository, fix, base and options as strsim-jaro-length-one"
     assert (strsim.toolchain, strsim.lockfile) == ("1.39.0", "generated")
     assert (strsim.fail_to_pass, strsim.pass_to_pass, strsim.flaky) == (2, 102, 0)
     assert (semver.toolchain, semver.lockfile) == ("1.68.0", "date-bounded")

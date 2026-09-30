@@ -3,12 +3,14 @@
 The recipes file lists tasks (``[[task]]`` tables: ``repo`` and ``fix``, optionally
 ``base``, ``name``, ``vendor``, ``image``, ``index_dir``, ``replay``, ``reruns`` and
 ``test_timeout``) and ``[defaults]`` that every task inherits. Local paths are relative
-to the file's directory; URLs are used as they are. Two tasks are the same task when
-their repository slug and resolved fix commit agree, whatever the spelling of the
-repository or the length of the SHA: once one of them has run to a verdict, the others
-are skipped and reported as duplicates (after an error, the next spelling runs). Every
-task gets its own bundle directory under the batch output directory (its ``name``, or
-``<slug>-<fix12>``; a name that a task with a verdict holds is an error), and the
+to the file's directory; URLs (``scheme://`` and git's scp-like ``[user@]host:path``)
+are used as they are. Two tasks are the same task when their repository slug, resolved
+fix commit, resolved base commit, ``vendor`` and ``image`` agree, whatever the spelling
+of the repository or the length of the SHAs: once one of them has run to a verdict, the
+others are skipped and reported as duplicates (after an error, the next spelling runs).
+Every task gets its own bundle directory under the batch output directory (its
+``name``, or ``<slug>-<fix12>``; a name that a task with a verdict holds, compared
+without case and Unicode normalization as macOS file systems do, is an error), and the
 batch writes ``summary.json`` and ``summary.md`` next to them.
 """
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import time
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -26,7 +29,7 @@ from cargorewind import __version__
 from cargorewind.backend import Backend
 from cargorewind.buildcache import BuildCache
 from cargorewind.crateindex import CrateIndex, DirectoryIndex
-from cargorewind.gitops import open_checkout, repo_slug
+from cargorewind.gitops import GitError, is_remote, open_checkout, repo_slug
 from cargorewind.registry import ImageResolver
 from cargorewind.rewind import (
     DEFAULT_RERUNS,
@@ -147,10 +150,12 @@ def _path(base: Path, value: Any, key: str) -> Path:
 
 
 def _source(base: Path, value: str) -> str:
-    """A URL stays a URL; a local path is relative to the recipes file."""
-    if "://" in value or value.startswith("git@"):
-        return value
-    return str(_local(base, value))
+    """A URL stays a URL; a local path is relative to the recipes file. As for
+    ``git clone``, a value that names an existing path is a path even with a colon."""
+    local = _local(base, value)
+    if local.exists() or not is_remote(value):
+        return str(local)
+    return value
 
 
 def _int(value: Any, key: str, minimum: int) -> int:
@@ -241,9 +246,32 @@ def task_options(task: BatchTask, options: BatchOptions, out: Path) -> RewindOpt
     )
 
 
-def _resolve(task: BatchTask, options: BatchOptions, runner: Runner) -> str:
+def _resolve(task: BatchTask, options: BatchOptions, runner: Runner) -> tuple[str, str]:
+    """The fix commit and the base commit (explicit, else the first parent; empty for a
+    root commit, which rewind then reports)."""
     git = open_checkout(runner, task.repo, options.workdir / task.checkout)
-    return git.rev_parse(task.fix)
+    fix = git.rev_parse(task.fix)
+    if task.base is not None:
+        return fix, git.rev_parse(task.base)
+    try:
+        return fix, git.first_parent(fix)
+    except GitError:
+        return fix, ""
+
+
+TaskKey = tuple[str, str, str, bool, str]
+
+
+def task_key(task: BatchTask, fix: str, base: str) -> TaskKey:
+    """What makes two tasks the same task: repository, both commits (they decide the
+    patches and the test lists) and the options that change the environment."""
+    return (task.slug, fix, base, task.vendor, task.image or "")
+
+
+def dir_key(name: str) -> str:
+    """A bundle directory name as a case-insensitive, normalization-insensitive file
+    system (APFS, the macOS default) sees it: ``Demo`` and ``demo`` are one directory."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFD", name).casefold())
 
 
 def _record(result: BatchResult, report: RewindReport) -> None:
@@ -273,30 +301,30 @@ def run_batch(
     """Run every task in order; an error in one task (one of ``options.failures``) is
     recorded and the batch goes on."""
     results: list[BatchResult] = []
-    seen: dict[tuple[str, str], BatchResult] = {}
-    bundles: dict[str, BatchResult] = {}  # bundle directory name -> the task that owns it
+    seen: dict[TaskKey, BatchResult] = {}
+    bundles: dict[str, BatchResult] = {}  # dir_key(bundle name) -> the task that owns it
     options.out.mkdir(parents=True, exist_ok=True)
     for number, task in enumerate(tasks, 1):
         result = BatchResult(task, "error")
         started = time.monotonic()
         log(f"task      {number}/{len(tasks)} {task.repo} --fix {task.fix}")
         try:
-            result.fix_commit = _resolve(task, options, runner)
-            key = (task.slug, result.fix_commit)
+            result.fix_commit, base = _resolve(task, options, runner)
+            key = task_key(task, result.fix_commit, base)
             first = seen.get(key)
-            owner = bundles.get(result.label)
+            owner = bundles.get(dir_key(result.label))
             if first is not None:
                 result.status = "duplicate"
-                result.detail = f"same repository and fix commit as {first.label}"
+                result.detail = f"same repository, fix, base and options as {first.label}"
                 log(f"skip      {result.detail}")
             elif owner is not None:
                 result.detail = (
-                    f"bundle directory {result.label} is taken by task "
+                    f"bundle directory {result.label} is taken by task {owner.label}: "
                     f"{owner.task.repo} --fix {owner.task.fix}; give this task another name"
                 )
                 log(f"error     {result.detail}")
             else:
-                bundles[result.label] = result
+                bundles[dir_key(result.label)] = result
                 result.out = options.out / result.label
                 report = rewind(
                     task_options(task, options, result.out), runner, backends(task), log
@@ -307,8 +335,9 @@ def run_batch(
                 seen[key] = result
         except options.failures as exc:
             result.status = "error"
-            if bundles.get(result.label) is result:
-                del bundles[result.label]  # nothing usable there: a retry may take it
+            if bundles.get(dir_key(result.label)) is result:
+                # Nothing usable there: a retry may take it (rewind clears what is left).
+                del bundles[dir_key(result.label)]
             result.detail = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
             log(f"error     {result.detail}")
         result.seconds = round(time.monotonic() - started, 1)

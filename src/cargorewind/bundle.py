@@ -326,6 +326,23 @@ def read_test_list(path: Path) -> list[str]:
     return [line for line in path.read_text().splitlines() if line]
 
 
+def clear_bundle(out: Path) -> None:
+    """Remove every file a bundle may hold (and an earlier verify run) from ``out``.
+
+    Bundles are written in place and ``manifest`` hashes what exists, so a directory
+    reused by another task (a batch retry after an error, a second run into the same
+    ``--out``) must not keep that task's ``Cargo.lock``, logs or verify result. Other
+    files in ``out`` are left alone.
+    """
+    for name in (*BUNDLE_FILES, "Cargo.lock", "task.json", "verify/verify.json"):
+        (out / name).unlink(missing_ok=True)
+    for logs in (out / "logs", out / "verify" / "logs"):
+        if logs.is_dir():
+            for path in logs.iterdir():
+                if path.suffix == ".log" and path.is_file():
+                    path.unlink()
+
+
 def manifest(out: Path) -> dict[str, str]:
     """sha256 of every bundle file that exists (``task.json`` itself excluded)."""
     names = [*BUNDLE_FILES, "Cargo.lock"]

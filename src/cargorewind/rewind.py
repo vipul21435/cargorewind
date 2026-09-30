@@ -27,6 +27,7 @@ from cargorewind.bundle import (
     SplitSummary,
     Task,
     TestRow,
+    clear_bundle,
     manifest,
     write_task,
     write_test_lists,
@@ -458,6 +459,7 @@ def rewind(options: RewindOptions, runner: Runner, backend: Backend, log: Log) -
     git = open_checkout(runner, options.source, workdir)
     commits = resolve_commits(git, options.fix, options.base, log)
     base, fix = commits.base, commits.fix
+    clear_bundle(out)  # a reused directory must not keep another task's files
     split, checks = split_commit(commits, options.source, out, log)
     require(checks)
     toolchain, plan, choice, patched = _environment(options, commits, split, log)

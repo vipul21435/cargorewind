@@ -648,7 +648,7 @@ def test_batch_command_replays_dedupes_and_writes_the_summary(tmp_path: Path) ->
     assert f"mode      replay of {_shown(transcript)} (no Docker)" in stdout
     assert f"error     {tmp_path / 'missing.json'}: cannot read transcript" in stdout
     assert "verdict       VERIFIED" not in stdout  # rewind's own summary is not printed
-    assert "skip      same repository and fix commit as strsim" in stdout
+    assert "skip      same repository, fix, base and options as strsim" in stdout
     assert "error     bundle directory strsim is taken by task" in stdout
     table = stdout.split("\n\n")[1].splitlines()
     assert table[0].split() == [
