@@ -507,6 +507,34 @@ Five confirmed findings were fixed, each with regression tests:
 - The live-batch table in the README predates the new duplicate message; it is kept
   as recorded and labeled as such rather than re-running 3 min 42 s of Docker.
 
+## Late review of slice 5: findings fixed (2026-09-30)
+
+Five confirmed findings from a late review of slice 5, each fixed with a regression
+test that fails on the old code:
+
+- Old cargo prints only the binary, so the library, `src/main.rs` and
+  `tests/<crate>.rs` all run as `<crate>-<hash>`. Such a binary now resolves to a
+  `shared` target naming every candidate (`lib x or test x`), rerun with `--tests`.
+  Chosen over a union of `--lib --test x` because a target can be absent in one stage
+  (a test file the test patch adds does not exist at base, and `--test x` would then
+  be a cargo error); `--tests` runs every binary a stage runs and no doctests. Chosen
+  over mapping by run order, which breaks when a candidate does not run (`test =
+  false`). Checked on rust 1.39.0 in this project's strsim-rs image; the recording is
+  `tests/fixtures/libtest/shared-binary-1.39.0.txt` (an original crate).
+- rustdoc 1.39 names a crate-level doctest `src/lib.rs -  (line N)` (two spaces); the
+  name and doctest patterns accept an empty item, and the stable name is
+  `src/lib.rs - (crate)` on every toolchain.
+- A rerun round that never reached its test (the rerun run hit `--timeout`, or the
+  command hit `--test-timeout` before any test binary started) is left out of the
+  flaky comparison and logged, instead of counting as `timeout`. No up-front budget
+  check was added: the worst case (rounds x candidates x `--test-timeout`) exceeds
+  the default `--timeout` for any real suite, so a warning would fire on every run;
+  the README lists it under Known issues. No task schema change: a shorter `reruns`
+  list plus the stage's `timed_out` say what happened.
+- The per-test `command` in task.json is built with `shlex.join`.
+- `assign_ids_qualify_names_that_two_targets_share` lacked the `test_` prefix and
+  never ran; renamed.
+
 ## Stashed work
 
 - `stash@{0}` "wip from interrupted agent" was restored with `git stash pop` on
