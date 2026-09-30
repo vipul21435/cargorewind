@@ -1,0 +1,10 @@
+{"name":"serde_core","vers":"1.0.220","deps":[{"name":"serde_derive","req":"=1.0.220"}],"yanked":false,"pubtime":"2025-09-13T21:46:48Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.221","deps":[{"name":"serde_derive","req":"=1.0.221"}],"yanked":false,"pubtime":"2025-09-14T00:25:43Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.222","deps":[{"name":"serde_derive","req":"=1.0.222"}],"yanked":false,"pubtime":"2025-09-14T18:10:31Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.223","deps":[{"name":"serde_derive","req":"=1.0.223"}],"yanked":false,"pubtime":"2025-09-14T20:20:58Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.224","deps":[{"name":"serde_derive","req":"=1.0.224"}],"yanked":false,"pubtime":"2025-09-15T15:46:58Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.225","deps":[{"name":"serde_derive","req":"=1.0.225"}],"yanked":false,"pubtime":"2025-09-16T03:43:48Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.226","deps":[{"name":"serde_derive","req":"=1.0.226"}],"yanked":false,"pubtime":"2025-09-20T23:37:46Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.227","deps":[{"name":"serde_derive","req":"=1.0.227"}],"yanked":false,"pubtime":"2025-09-25T23:43:00Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.228","deps":[{"name":"serde_derive","req":"=1.0.228"}],"yanked":false,"pubtime":"2025-09-27T16:51:25Z","rust_version":"1.56"}
+{"name":"serde_core","vers":"1.0.229","deps":[{"name":"serde_derive","req":"=1.0.229"}],"yanked":false,"pubtime":"2026-07-18T23:05:10Z","rust_version":"1.56"}

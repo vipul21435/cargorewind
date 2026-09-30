@@ -323,3 +323,42 @@ def test_local_paths_below_the_working_directory_are_spelled_relative(
     assert a.repo == str(Path("recipes/../crates/a.bundle"))
     assert a.replay == Path("recipes/t.json")
     assert b.repo == "b.bundle" and b.index_dir == Path("/elsewhere")
+
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+
+
+def test_the_example_recipes_replay_two_real_flips_offline(tmp_path: Path) -> None:
+    """examples/batch.toml: strsim-rs (cfg(test) tests in src/lib.rs, no dependencies) and
+    semver (an integration test, a lockfile bounded by the commit date), plus a duplicate."""
+    tasks = load_recipes(EXAMPLES / "batch.toml")
+    assert [t.name for t in tasks] == [
+        "strsim-jaro-length-one",
+        "semver-empty-version-error",
+        "strsim-again",
+    ]
+    options = BatchOptions(tmp_path / "out", tmp_path / "work")
+
+    def replay(task: BatchTask) -> Backend:
+        assert task.replay is not None
+        return ReplayBackend(task.replay)
+
+    strsim, semver, again = run_batch(tasks, options, SubprocessRunner(), replay, lambda _: None)
+    assert (strsim.status, semver.status, again.status) == ("verified", "verified", "duplicate")
+    assert (semver.toolchain, semver.lockfile) == ("1.68.0", "date-bounded")
+    assert (semver.fail_to_pass, semver.pass_to_pass, semver.flaky) == (1, 34, 0)
+    assert semver.fix_commit == "d92a4d8ff7d1a90caf9fcac9bf120c360455d8d9"
+    task = json.loads((tmp_path / "out" / "semver-empty-version-error" / "task.json").read_text())
+    assert task["FAIL_TO_PASS"] == ["test_parse"]
+    assert task["tests"]["test_parse"]["target"] == "test test_version"
+    assert task["tests"]["test_parse"]["command"] == (
+        "cargo test --test test_version -- --exact test_parse"
+    )
+    assert task["split"]["test_files"] == ["tests/test_version.rs"]
+    assert task["split"]["fix_files"] == ["src/error.rs", "src/parse.rs"]
+    lock = json.loads((tmp_path / "out" / "semver-empty-version-error" / "lock.json").read_text())
+    assert lock["strategy"] == "date-bounded" and lock["bounded"] is True
+    assert [(p["name"], p["to"]) for r in lock["rounds"] for p in r["pins"]] == [
+        ("serde", "1.0.155")
+    ]
+    assert exit_code([strsim, semver, again]) == 0

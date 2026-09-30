@@ -1,4 +1,4 @@
-.PHONY: install lint format typecheck test cov demo verify-demo verify-live batch-demo batch-live split-demo toolchain-demo lock-demo lock-demo-live record-lock-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
+.PHONY: install lint format typecheck test cov demo verify-demo verify-live batch-demo batch-live record-semver-demo split-demo toolchain-demo lock-demo lock-demo-live record-lock-demo demo-live record-demo e2e docker-build docker-demo docker-prune check clean
 
 IMAGE ?= cargorewind:dev
 DEMO_ARGS = examples/strsim/strsim-rs.bundle --fix 605c81c9b9
@@ -44,6 +44,15 @@ batch-demo:
 # Live: the same tasks through Docker (their replay files are ignored).
 batch-live:
 	uv run cargorewind batch examples/batch.toml --out out/batch-live --live
+	$(MAKE) docker-prune
+
+# Re-record the semver transcript and trim the crates.io index files the live run read.
+record-semver-demo:
+	rm -rf out/semver-cache examples/semver/index
+	uv run cargorewind rewind examples/semver/semver.bundle --fix d92a4d8 --out out/semver-live \
+		--cache-dir out/semver-cache --record examples/semver/transcript.json
+	uv run python tests/fixtures/crates-index/record.py examples/semver/index \
+		--from-cache out/semver-cache --minimal
 	$(MAKE) docker-prune
 
 # Offline: split the strsim-rs fix into test.patch and fix.patch and write split.json.

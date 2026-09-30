@@ -1,17 +1,28 @@
-# Recorded rewinds, replayed offline: `make batch-demo` runs
+# Recorded rewinds of two real fixes, replayed offline: `make batch-demo` runs
 # `cargorewind batch examples/batch.toml`. Paths are relative to this file;
 # `cargorewind batch --live` ignores the `replay` lines and runs every task through Docker.
 
 [defaults]
 reruns = 3
 
+# strsim-rs: the fix and its two new tests share src/lib.rs (#[cfg(test)] mod tests);
+# no dependencies, rust 1.39.0.
 [[task]]
 name = "strsim-jaro-length-one"
 repo = "strsim/strsim-rs.bundle"
 fix = "605c81c9b9"
 replay = "strsim/transcript.json"
 
-# The same task again, spelled with the full SHA and another name: deduplicated.
+# semver: the changed test is an integration test (tests/test_version.rs); no Cargo.lock,
+# so the lockfile is bounded by the commit date with the recorded crates.io index files.
+[[task]]
+name = "semver-empty-version-error"
+repo = "semver/semver.bundle"
+fix = "d92a4d8"
+index_dir = "semver/index"
+replay = "semver/transcript.json"
+
+# The first task again, spelled with the full SHA and another name: deduplicated.
 [[task]]
 name = "strsim-again"
 repo = "strsim/strsim-rs.bundle"

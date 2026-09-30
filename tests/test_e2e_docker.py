@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from cargorewind.backend import DockerBackend
+from cargorewind.batch import BatchOptions, load_recipes, run_batch, summary_document, with_defaults
 from cargorewind.buildcache import BuildCache
 from cargorewind.crateindex import DirectoryIndex
 from cargorewind.dockerfile import render_dockerfile
@@ -146,3 +147,46 @@ def test_live_build_fails_when_a_probe_word_exists_at_base(tmp_path: Path) -> No
     (context / "Dockerfile").write_text(render_dockerfile(wrong))
     with pytest.raises(CommandError, match="cargorewind probe failed: found at base"):
         DockerBackend(runner, timeout=600).build(context, "cargorewind/probe-check:live")
+
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+
+
+@pytest.mark.docker
+def test_live_batch_verifies_two_real_crates(tmp_path: Path) -> None:
+    """examples/batch.toml through Docker, replay files ignored: strsim-rs 605c81c9b9 (tests
+    in src/lib.rs, no dependencies) and semver d92a4d8 (an integration test, a lockfile the
+    pin loop bounds by the commit date); the third task is a duplicate and never runs."""
+    runner = SubprocessRunner()
+    tasks = with_defaults(load_recipes(EXAMPLES / "batch.toml"), replay=None)
+    options = BatchOptions(
+        tmp_path / "out",
+        tmp_path / "work",
+        cache=BuildCache(tmp_path / "cache", runner),
+        failures=(),  # any error fails the test with its traceback
+    )
+    results = run_batch(
+        tasks, options, runner, lambda task: DockerBackend(runner, timeout=1800), print
+    )
+
+    strsim, semver, again = results
+    assert [r.status for r in results] == ["verified", "verified", "duplicate"]
+    assert again.detail == "same repository and fix commit as strsim-jaro-length-one"
+    assert (strsim.toolchain, strsim.lockfile) == ("1.39.0", "generated")
+    assert (strsim.fail_to_pass, strsim.pass_to_pass, strsim.flaky) == (2, 102, 0)
+    assert (semver.toolchain, semver.lockfile) == ("1.68.0", "date-bounded")
+    assert (semver.fail_to_pass, semver.pass_to_pass, semver.flaky) == (1, 34, 0)
+    task = json.loads((tmp_path / "out" / "semver-empty-version-error" / "task.json").read_text())
+    assert task["FAIL_TO_PASS"] == ["test_parse"]
+    assert task["tests"]["test_parse"]["target"] == "test test_version"
+    assert task["runs"]["before"]["failed"] == 1 and task["runs"]["after"]["failed"] == 0
+    assert (
+        'name = "serde"\nversion = "1.0.155"'
+        in (tmp_path / "out" / "semver-empty-version-error" / "Cargo.lock").read_text()
+    )
+    assert summary_document(EXAMPLES / "batch.toml", results)["counts"] == {
+        "verified": 2,
+        "not-verified": 0,
+        "error": 0,
+        "duplicate": 1,
+    }

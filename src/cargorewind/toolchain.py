@@ -180,6 +180,7 @@ STABLE_RELEASES: tuple[tuple[str, str], ...] = (
 IMAGE_DIGESTS: dict[str, str] = {
     "1.39.0": "sha256:b47dd7b5f59bea2bc19ac18e81cc6b5b3cfe6c4e40082cab09604b296bca2652",
     "1.56.1": "sha256:cc2b5c03d4acf19be7fa8155cae8abbc8c3aa893a5d177ceb4921a3cbbb190da",
+    "1.68.0": "sha256:85099324ff518e0aa14b7b80529d1cdd934ff92a344bdd961b7a7feba1a6f3bf",
     "1.70.0": "sha256:d1f62de1372e7103b9973848c3f873abfb73a6668ce4b0af2fe57fd9e32178b8",
     "1.73.0": "sha256:666012b6779ebb6be2acb771b8627716662cf699502e734652c4799ae4199691",
     "1.75.0": "sha256:70c2a016184099262fd7cee46f3d35fec3568c45c62f87e37f7f665f766b1f74",
